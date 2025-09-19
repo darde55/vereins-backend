@@ -1,3 +1,7 @@
+// Fehler-Logger ganz oben einfügen!
+process.on('uncaughtException', err => console.error('Uncaught Exception:', err));
+process.on('unhandledRejection', err => console.error('Unhandled Rejection:', err));
+
 const express = require('express');
 const cors = require('cors');
 const sqlite3 = require('sqlite3').verbose();
@@ -10,7 +14,7 @@ const app = express();
 const port = process.env.PORT || 3001;
 const SECRET = 'dein_geheimes_jwt_secret';
 
-// Nutze /tmp für Railway-Kompatibilität (wichtig!)
+// DB-Pfad je nach Umgebung setzen (für Railway wichtig!)
 const DB_PATH = process.env.NODE_ENV === 'production' ? '/tmp/termine.db' : './termine.db';
 
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://vereins-frontend.vercel.app';
@@ -21,7 +25,7 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// DB anlegen/öffnen & Tabellen
+// SQLite DB öffnen & Tabellen initialisieren
 const db = new sqlite3.Database(DB_PATH, (err) => {
   if (err) {
     console.error('DB-Fehler:', err.message);
@@ -318,7 +322,7 @@ app.post('/api/termine/:id/einschreiben', authMiddleware, (req, res) => {
   });
 });
 
-// Test-Route (optional, um zu prüfen, ob das Backend läuft)
+// Test-Route (Healthcheck für Railway)
 app.get('/api', (req, res) => {
   res.send('API läuft!');
 });
