@@ -10,16 +10,26 @@ const app = express();
 const port = process.env.PORT || 3001;
 const SECRET = 'dein_geheimes_jwt_secret';
 
-const FRONTEND_URL = process.env.FRONTEND_URL || 'https://vereins-frontend.vercel.app'; // <-- Anpassen!
+// Nutze /tmp für Railway-Kompatibilität (wichtig!)
+const DB_PATH = process.env.NODE_ENV === 'production' ? '/tmp/termine.db' : './termine.db';
+
+const FRONTEND_URL = process.env.FRONTEND_URL || 'https://vereins-frontend.vercel.app';
 
 app.use(cors({
   origin: FRONTEND_URL,
-  credentials: true // falls du Authentifizierung oder Cookies nutzt
+  credentials: true
 }));
 app.use(express.json());
 
 // DB anlegen/öffnen & Tabellen
-const db = new sqlite3.Database('./termine.db');
+const db = new sqlite3.Database(DB_PATH, (err) => {
+  if (err) {
+    console.error('DB-Fehler:', err.message);
+    process.exit(1);
+  } else {
+    console.log(`SQLite DB geöffnet unter ${DB_PATH}`);
+  }
+});
 db.serialize(() => {
   db.run(`CREATE TABLE IF NOT EXISTS termine (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -42,6 +52,7 @@ db.serialize(() => {
     username TEXT NOT NULL,
     UNIQUE(termin_id, username)
   )`);
+  console.log('SQLite Tabellen initialisiert!');
 });
 
 // Auth Middleware
@@ -310,6 +321,11 @@ app.post('/api/termine/:id/einschreiben', authMiddleware, (req, res) => {
 // Test-Route (optional, um zu prüfen, ob das Backend läuft)
 app.get('/api', (req, res) => {
   res.send('API läuft!');
+});
+
+// Root-Route für Healthcheck
+app.get('/', (req, res) => {
+  res.send('Backend läuft!');
 });
 
 // Server starten
