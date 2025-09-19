@@ -10,7 +10,12 @@ const app = express();
 const port = process.env.PORT || 3001;
 const SECRET = 'dein_geheimes_jwt_secret';
 
-app.use(cors());
+const FRONTEND_URL = process.env.FRONTEND_URL || 'https://vereins-frontend.vercel.app'; // <-- Anpassen!
+
+app.use(cors({
+  origin: FRONTEND_URL,
+  credentials: true // falls du Authentifizierung oder Cookies nutzt
+}));
 app.use(express.json());
 
 // DB anlegen/öffnen & Tabellen
