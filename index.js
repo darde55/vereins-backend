@@ -15,6 +15,7 @@ const { createEvent } = require('ics');
 
 const app = express();
 
+// Port von Railway oder 3001 lokal
 const port = process.env.PORT || 3001;
 const SECRET = process.env.JWT_SECRET || 'dein_geheimes_jwt_secret';
 
@@ -316,7 +317,7 @@ app.get('/', (req, res) => {
   res.send('Backend läuft!');
 });
 
-// Server starten
+// Server starten (immer mit richtigem Port!)
 app.listen(port, () => {
   console.log(`Backend läuft auf Port ${port}`);
 });
