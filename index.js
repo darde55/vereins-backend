@@ -1,8 +1,9 @@
-setInterval(() => {}, 10000);
-
-// Fehler-Logger ganz oben einfügen!
+// Fehler-Logger ganz oben!
 process.on('uncaughtException', err => console.error('Uncaught Exception:', err));
 process.on('unhandledRejection', err => console.error('Unhandled Rejection:', err));
+
+// Workaround: Prozess wach halten (Railway)
+setInterval(() => {}, 10000);
 
 const express = require('express');
 const cors = require('cors');
@@ -13,12 +14,14 @@ const nodemailer = require('nodemailer');
 const { createEvent } = require('ics');
 
 const app = express();
-const port = process.env.PORT || 3001;
-const SECRET = 'dein_geheimes_jwt_secret';
 
-// DB-Pfad je nach Umgebung setzen (für Railway wichtig!)
+const port = process.env.PORT || 3001;
+const SECRET = process.env.JWT_SECRET || 'dein_geheimes_jwt_secret';
+
+// DB-Pfad für Railway: /tmp, sonst lokal
 const DB_PATH = process.env.NODE_ENV === 'production' ? '/tmp/termine.db' : './termine.db';
 
+// Frontend-URL erlauben
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://vereins-frontend.vercel.app';
 
 app.use(cors({
@@ -36,6 +39,7 @@ const db = new sqlite3.Database(DB_PATH, (err) => {
     console.log(`SQLite DB geöffnet unter ${DB_PATH}`);
   }
 });
+
 db.serialize(() => {
   db.run(`CREATE TABLE IF NOT EXISTS termine (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -107,29 +111,6 @@ app.get('/api/users', authMiddleware, adminOnly, (req, res) => {
   });
 });
 
-// User suchen/filtern (Admin)
-app.get('/api/users/search', authMiddleware, adminOnly, (req, res) => {
-  const { username, email, role } = req.query;
-  let sql = 'SELECT id, username, email, role, active FROM users WHERE 1=1';
-  let params = [];
-  if (username) {
-    sql += ' AND username LIKE ?';
-    params.push('%' + username + '%');
-  }
-  if (email) {
-    sql += ' AND email LIKE ?';
-    params.push('%' + email + '%');
-  }
-  if (role) {
-    sql += ' AND role = ?';
-    params.push(role);
-  }
-  db.all(sql, params, (err, rows) => {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json(rows);
-  });
-});
-
 // Einzelnen User anzeigen (Admin oder User selbst)
 app.get('/api/users/:id', authMiddleware, (req, res) => {
   const id = Number(req.params.id);
@@ -193,6 +174,7 @@ app.delete('/api/users/:id', authMiddleware, adminOnly, (req, res) => {
   const id = Number(req.params.id);
   db.run('DELETE FROM users WHERE id = ?', [id], function (err) {
     if (err) return res.status(500).json({ error: err.message });
+    db.run('DELETE FROM teilnahmen WHERE username = (SELECT username FROM users WHERE id = ?)', [id]);
     res.json({ erfolg: true });
   });
 });
@@ -258,8 +240,8 @@ const transporter = nodemailer.createTransport({
   port: 587,
   secure: false,
   auth: {
-    user: "tsvdienste@web.de",
-    pass: "TSV_Dienste123",
+    user: process.env.MAIL_USER || "tsvdienste@web.de",
+    pass: process.env.MAIL_PASS || "TSV_Dienste123",
   },
 });
 
@@ -303,7 +285,7 @@ app.post('/api/termine/:id/einschreiben', authMiddleware, (req, res) => {
             }
             try {
               await transporter.sendMail({
-                from: 'tsvdienste@web.de',
+                from: process.env.MAIL_USER || 'tsvdienste@web.de',
                 to: userRow.email,
                 subject: `Bestätigung: "${termin.titel}"`,
                 text: `Du bist zum Termin "${termin.titel}" am ${dateObj.toLocaleString("de-DE")} angemeldet.`,
