@@ -7,7 +7,7 @@ setInterval(() => {}, 10000);
 
 const express = require('express');
 const cors = require('cors');
-const sqlite3 = require('sqlite3').verbose();
+const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const nodemailer = require('nodemailer');
@@ -19,9 +19,6 @@ const app = express();
 const port = process.env.PORT || 3001;
 const SECRET = process.env.JWT_SECRET || 'dein_geheimes_jwt_secret';
 
-// DB-Pfad für Railway: /tmp, sonst lokal
-const DB_PATH = process.env.NODE_ENV === 'production' ? '/tmp/termine.db' : './termine.db';
-
 // Frontend-URL erlauben
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://vereins-frontend.vercel.app';
 
@@ -31,40 +28,42 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// SQLite DB öffnen & Tabellen initialisieren
-const db = new sqlite3.Database(DB_PATH, (err) => {
-  if (err) {
-    console.error('DB-Fehler:', err.message);
-    process.exit(1);
-  } else {
-    console.log(`SQLite DB geöffnet unter ${DB_PATH}`);
-  }
+// PostgreSQL-Pool einrichten
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false } // für Railway notwendig!
 });
 
-db.serialize(() => {
-  db.run(`CREATE TABLE IF NOT EXISTS termine (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    titel TEXT NOT NULL,
-    datum TEXT NOT NULL,
-    beschreibung TEXT,
-    anzahl INTEGER NOT NULL
-  )`);
-  db.run(`CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT UNIQUE NOT NULL,
-    password TEXT NOT NULL,
-    role TEXT NOT NULL CHECK (role IN ('admin', 'user')),
-    email TEXT,
-    active INTEGER NOT NULL DEFAULT 1
-  )`);
-  db.run(`CREATE TABLE IF NOT EXISTS teilnahmen (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    termin_id INTEGER NOT NULL,
-    username TEXT NOT NULL,
-    UNIQUE(termin_id, username)
-  )`);
-  console.log('SQLite Tabellen initialisiert!');
-});
+// Tabellen initialisieren (nur beim ersten Start notwendig)
+async function initTables() {
+  try {
+    await pool.query(`CREATE TABLE IF NOT EXISTS termine (
+      id SERIAL PRIMARY KEY,
+      titel TEXT NOT NULL,
+      datum TEXT NOT NULL,
+      beschreibung TEXT,
+      anzahl INTEGER NOT NULL
+    )`);
+    await pool.query(`CREATE TABLE IF NOT EXISTS users (
+      id SERIAL PRIMARY KEY,
+      username TEXT UNIQUE NOT NULL,
+      password TEXT NOT NULL,
+      role TEXT NOT NULL CHECK (role IN ('admin', 'user')),
+      email TEXT,
+      active BOOLEAN NOT NULL DEFAULT true
+    )`);
+    await pool.query(`CREATE TABLE IF NOT EXISTS teilnahmen (
+      id SERIAL PRIMARY KEY,
+      termin_id INTEGER NOT NULL REFERENCES termine(id) ON DELETE CASCADE,
+      username TEXT NOT NULL REFERENCES users(username) ON DELETE CASCADE,
+      UNIQUE(termin_id, username)
+    )`);
+    console.log('Postgres Tabellen initialisiert!');
+  } catch (e) {
+    console.error("Tabellen-Initialisierung fehlgeschlagen:", e);
+  }
+}
+initTables();
 
 // Auth Middleware
 function authMiddleware(req, res, next) {
@@ -87,12 +86,13 @@ function adminOnly(req, res, next) {
 }
 
 // Login
-app.post('/api/login', (req, res) => {
+app.post('/api/login', async (req, res) => {
   const { username, password } = req.body;
-  db.get('SELECT * FROM users WHERE username = ?', [username], async (err, user) => {
-    if (err) return res.status(500).json({ error: err.message });
+  try {
+    const result = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
+    const user = result.rows[0];
     if (!user) return res.status(400).json({ error: 'User nicht gefunden' });
-    if (user.active !== 1) return res.status(403).json({ error: 'User ist gesperrt' });
+    if (!user.active) return res.status(403).json({ error: 'User ist gesperrt' });
     const valid = await bcrypt.compare(password, user.password);
     if (!valid) return res.status(400).json({ error: 'Falsches Passwort' });
     const token = jwt.sign(
@@ -101,28 +101,35 @@ app.post('/api/login', (req, res) => {
       { expiresIn: '2h' }
     );
     res.json({ token, username: user.username, role: user.role });
-  });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
 });
 
 // Alle User anzeigen (Admin)
-app.get('/api/users', authMiddleware, adminOnly, (req, res) => {
-  db.all('SELECT id, username, email, role, active FROM users', [], (err, rows) => {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json(rows);
-  });
+app.get('/api/users', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT id, username, email, role, active FROM users');
+    res.json(result.rows);
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
 });
 
 // Einzelnen User anzeigen (Admin oder User selbst)
-app.get('/api/users/:id', authMiddleware, (req, res) => {
+app.get('/api/users/:id', authMiddleware, async (req, res) => {
   const id = Number(req.params.id);
   if (req.user.role !== "admin" && req.user.id !== id) {
     return res.status(403).json({ error: "Keine Berechtigung" });
   }
-  db.get('SELECT id, username, email, role, active FROM users WHERE id = ?', [id], (err, user) => {
-    if (err) return res.status(500).json({ error: err.message });
+  try {
+    const result = await pool.query('SELECT id, username, email, role, active FROM users WHERE id = $1', [id]);
+    const user = result.rows[0];
     if (!user) return res.status(404).json({ error: "User nicht gefunden" });
     res.json(user);
-  });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
 });
 
 // User anlegen (Admin)
@@ -130,19 +137,18 @@ app.post('/api/users', authMiddleware, adminOnly, async (req, res) => {
   const { username, password, role, email } = req.body;
   if (!username || !password || !role || !email) return res.status(400).json({ error: 'Alle Felder erforderlich' });
   const hashedPw = await bcrypt.hash(password, 10);
-  db.run(
-    'INSERT INTO users (username, password, role, email) VALUES (?, ?, ?, ?)',
-    [username, hashedPw, role, email],
-    function (err) {
-      if (err) {
-        if (err.message.includes('UNIQUE')) {
-          return res.status(400).json({ error: 'Username existiert bereits' });
-        }
-        return res.status(500).json({ error: err.message });
-      }
-      res.json({ id: this.lastID, username, role, email });
+  try {
+    const result = await pool.query(
+      'INSERT INTO users (username, password, role, email) VALUES ($1, $2, $3, $4) RETURNING id, username, role, email',
+      [username, hashedPw, role, email]
+    );
+    res.json(result.rows[0]);
+  } catch (err) {
+    if ((err.message && err.message.toLowerCase().includes('unique')) || (err.code === '23505')) {
+      return res.status(400).json({ error: 'Username existiert bereits' });
     }
-  );
+    return res.status(500).json({ error: err.message });
+  }
 });
 
 // User bearbeiten (Admin oder User selbst)
@@ -152,87 +158,99 @@ app.put('/api/users/:id', authMiddleware, async (req, res) => {
   if (req.user.role !== "admin" && req.user.id !== id) {
     return res.status(403).json({ error: "Keine Berechtigung" });
   }
-  // Nur Admin darf Rolle und Aktiv-Status ändern
   let fields = [];
   let params = [];
-  if (email) { fields.push('email = ?'); params.push(email); }
+  let paramIdx = 1;
+  if (email) { fields.push(`email = $${paramIdx++}`); params.push(email); }
   if (password) {
     const hashedPw = await bcrypt.hash(password, 10);
-    fields.push('password = ?'); params.push(hashedPw);
+    fields.push(`password = $${paramIdx++}`); params.push(hashedPw);
   }
-  if (role && req.user.role === "admin") { fields.push('role = ?'); params.push(role); }
-  if (typeof active !== 'undefined' && req.user.role === "admin") { fields.push('active = ?'); params.push(active ? 1 : 0); }
+  if (role && req.user.role === "admin") { fields.push(`role = $${paramIdx++}`); params.push(role); }
+  if (typeof active !== 'undefined' && req.user.role === "admin") { fields.push(`active = $${paramIdx++}`); params.push(active ? true : false); }
   if (fields.length === 0) return res.status(400).json({ error: "Keine Felder zu ändern übergeben" });
   params.push(id);
-  db.run(`UPDATE users SET ${fields.join(', ')} WHERE id = ?`, params, function (err) {
-    if (err) return res.status(500).json({ error: err.message });
+  try {
+    await pool.query(`UPDATE users SET ${fields.join(', ')} WHERE id = $${paramIdx}`, params);
     res.json({ erfolg: true });
-  });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
 });
 
 // User löschen (nur Admin)
-app.delete('/api/users/:id', authMiddleware, adminOnly, (req, res) => {
+app.delete('/api/users/:id', authMiddleware, adminOnly, async (req, res) => {
   const id = Number(req.params.id);
-  db.run('DELETE FROM users WHERE id = ?', [id], function (err) {
-    if (err) return res.status(500).json({ error: err.message });
-    db.run('DELETE FROM teilnahmen WHERE username = (SELECT username FROM users WHERE id = ?)', [id]);
+  try {
+    // Username herausfinden für teilnahmen-Löschung
+    const result = await pool.query('SELECT username FROM users WHERE id = $1', [id]);
+    const user = result.rows[0];
+    if (!user) return res.status(404).json({ error: "User nicht gefunden" });
+    await pool.query('DELETE FROM teilnahmen WHERE username = $1', [user.username]);
+    await pool.query('DELETE FROM users WHERE id = $1', [id]);
     res.json({ erfolg: true });
-  });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
 });
 
 // Termine abrufen (mit Teilnehmern)
-app.get('/api/termine', (req, res) => {
-  db.all('SELECT * FROM termine', [], (err, termineRows) => {
-    if (err) return res.status(500).json({error: err.message});
-    db.all('SELECT * FROM teilnahmen', [], (err2, teilnahmenRows) => {
-      if (err2) return res.status(500).json({error: err2.message});
-      const result = termineRows.map(t => ({
-        ...t,
-        teilnehmer: teilnahmenRows.filter(te => te.termin_id === t.id).map(te => te.username)
-      }));
-      res.json(result);
-    });
-  });
+app.get('/api/termine', async (req, res) => {
+  try {
+    const termineResult = await pool.query('SELECT * FROM termine');
+    const teilnahmenResult = await pool.query('SELECT * FROM teilnahmen');
+    const result = termineResult.rows.map(t => ({
+      ...t,
+      teilnehmer: teilnahmenResult.rows.filter(te => te.termin_id === t.id).map(te => te.username)
+    }));
+    res.json(result);
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
 });
 
 // Neuen Termin anlegen (nur Admin)
-app.post('/api/termine', authMiddleware, adminOnly, (req, res) => {
+app.post('/api/termine', authMiddleware, adminOnly, async (req, res) => {
   const { titel, datum, beschreibung, anzahl } = req.body;
   if (!titel || !datum || !anzahl) {
     return res.status(400).json({ error: 'Titel, Datum und Anzahl erforderlich' });
   }
-  db.run(
-    'INSERT INTO termine (titel, datum, beschreibung, anzahl) VALUES (?, ?, ?, ?)',
-    [titel, datum, beschreibung, anzahl],
-    function(err) {
-      if (err) return res.status(500).json({error: err.message});
-      res.json({ id: this.lastID, titel, datum, beschreibung, anzahl });
-    }
-  );
+  try {
+    const result = await pool.query(
+      'INSERT INTO termine (titel, datum, beschreibung, anzahl) VALUES ($1, $2, $3, $4) RETURNING *',
+      [titel, datum, beschreibung, anzahl]
+    );
+    res.json(result.rows[0]);
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
 });
 
 // Termin bearbeiten (nur Admin)
-app.put('/api/termine/:id', authMiddleware, adminOnly, (req, res) => {
+app.put('/api/termine/:id', authMiddleware, adminOnly, async (req, res) => {
   const termin_id = Number(req.params.id);
   const { titel, datum, beschreibung, anzahl } = req.body;
-  db.run(
-    'UPDATE termine SET titel = ?, datum = ?, beschreibung = ?, anzahl = ? WHERE id = ?',
-    [titel, datum, beschreibung, anzahl, termin_id],
-    function(err) {
-      if (err) return res.status(500).json({ error: err.message });
-      res.json({ erfolg: true });
-    }
-  );
+  try {
+    await pool.query(
+      'UPDATE termine SET titel = $1, datum = $2, beschreibung = $3, anzahl = $4 WHERE id = $5',
+      [titel, datum, beschreibung, anzahl, termin_id]
+    );
+    res.json({ erfolg: true });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
 });
 
 // Termin löschen (nur Admin)
-app.delete('/api/termine/:id', authMiddleware, adminOnly, (req, res) => {
+app.delete('/api/termine/:id', authMiddleware, adminOnly, async (req, res) => {
   const termin_id = Number(req.params.id);
-  db.run('DELETE FROM termine WHERE id = ?', [termin_id], function(err) {
-    if (err) return res.status(500).json({ error: err.message });
-    db.run('DELETE FROM teilnahmen WHERE termin_id = ?', [termin_id]);
+  try {
+    await pool.query('DELETE FROM teilnahmen WHERE termin_id = $1', [termin_id]);
+    await pool.query('DELETE FROM termine WHERE id = $1', [termin_id]);
     res.json({ erfolg: true });
-  });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
 });
 
 // Einschreiben für einen Termin mit E-Mail und ICS
@@ -246,65 +264,67 @@ const transporter = nodemailer.createTransport({
   },
 });
 
-app.post('/api/termine/:id/einschreiben', authMiddleware, (req, res) => {
+app.post('/api/termine/:id/einschreiben', authMiddleware, async (req, res) => {
   const termin_id = Number(req.params.id);
   const username = req.user.username;
-  db.get('SELECT * FROM termine WHERE id = ?', [termin_id], (err, termin) => {
-    if (err || !termin) return res.status(404).json({ error: 'Termin nicht gefunden' });
-    db.all('SELECT username FROM teilnahmen WHERE termin_id = ?', [termin_id], (err2, teilnahmen) => {
-      if (err2) return res.status(500).json({ error: err2.message });
-      if (teilnahmen.some(te => te.username === username)) {
-        return res.status(400).json({ error: 'Schon eingeschrieben' });
+  try {
+    const terminResult = await pool.query('SELECT * FROM termine WHERE id = $1', [termin_id]);
+    const termin = terminResult.rows[0];
+    if (!termin) return res.status(404).json({ error: 'Termin nicht gefunden' });
+
+    const teilnahmenResult = await pool.query('SELECT username FROM teilnahmen WHERE termin_id = $1', [termin_id]);
+    const teilnahmen = teilnahmenResult.rows;
+    if (teilnahmen.some(te => te.username === username)) {
+      return res.status(400).json({ error: 'Schon eingeschrieben' });
+    }
+    if (teilnahmen.length >= termin.anzahl) {
+      return res.status(400).json({ error: 'Keine Plätze mehr frei' });
+    }
+    const userResult = await pool.query('SELECT email FROM users WHERE username = $1', [username]);
+    const userRow = userResult.rows[0];
+    if (!userRow || !userRow.email) {
+      return res.status(400).json({ error: 'Keine E-Mail für diesen Nutzer hinterlegt' });
+    }
+    await pool.query('INSERT INTO teilnahmen (termin_id, username) VALUES ($1, $2)', [termin_id, username]);
+    const dateObj = new Date(termin.datum);
+    const event = {
+      start: [
+        dateObj.getFullYear(),
+        dateObj.getMonth() + 1,
+        dateObj.getDate(),
+        dateObj.getHours(),
+        dateObj.getMinutes(),
+      ],
+      duration: { hours: 1 },
+      title: termin.titel,
+      description: termin.beschreibung,
+      location: termin.ort || "",
+      organizer: { name: "VereinsApp", email: "noreply@deinserver.de" },
+    };
+    createEvent(event, async (icsError, icsValue) => {
+      if (icsError) {
+        return res.json({ erfolg: true, warnung: "Einschreibung ok, aber keine Kalenderdatei" });
       }
-      if (teilnahmen.length >= termin.anzahl) {
-        return res.status(400).json({ error: 'Keine Plätze mehr frei' });
-      }
-      db.get('SELECT email FROM users WHERE username = ?', [username], (errUser, userRow) => {
-        if (errUser || !userRow || !userRow.email) {
-          return res.status(400).json({ error: 'Keine E-Mail für diesen Nutzer hinterlegt' });
-        }
-        db.run('INSERT INTO teilnahmen (termin_id, username) VALUES (?, ?)', [termin_id, username], (err3) => {
-          if (err3) return res.status(400).json({ error: 'Fehler beim Einschreiben' });
-          const dateObj = new Date(termin.datum);
-          const event = {
-            start: [
-              dateObj.getFullYear(),
-              dateObj.getMonth() + 1,
-              dateObj.getDate(),
-              dateObj.getHours(),
-              dateObj.getMinutes(),
-            ],
-            duration: { hours: 1 },
-            title: termin.titel,
-            description: termin.beschreibung,
-            location: termin.ort || "",
-            organizer: { name: "VereinsApp", email: "noreply@deinserver.de" },
-          };
-          createEvent(event, async (icsError, icsValue) => {
-            if (icsError) {
-              return res.json({ erfolg: true, warnung: "Einschreibung ok, aber keine Kalenderdatei" });
-            }
-            try {
-              await transporter.sendMail({
-                from: process.env.MAIL_USER || 'tsvdienste@web.de',
-                to: userRow.email,
-                subject: `Bestätigung: "${termin.titel}"`,
-                text: `Du bist zum Termin "${termin.titel}" am ${dateObj.toLocaleString("de-DE")} angemeldet.`,
-                icalEvent: {
-                  filename: 'termin.ics',
-                  method: 'REQUEST',
-                  content: icsValue,
-                }
-              });
-              res.json({ erfolg: true });
-            } catch (mailErr) {
-              res.json({ erfolg: true, warnung: "Einschreibung ok, aber Mailversand fehlgeschlagen." });
-            }
-          });
+      try {
+        await transporter.sendMail({
+          from: process.env.MAIL_USER || 'tsvdienste@web.de',
+          to: userRow.email,
+          subject: `Bestätigung: "${termin.titel}"`,
+          text: `Du bist zum Termin "${termin.titel}" am ${dateObj.toLocaleString("de-DE")} angemeldet.`,
+          icalEvent: {
+            filename: 'termin.ics',
+            method: 'REQUEST',
+            content: icsValue,
+          }
         });
-      });
+        res.json({ erfolg: true });
+      } catch (mailErr) {
+        res.json({ erfolg: true, warnung: "Einschreibung ok, aber Mailversand fehlgeschlagen." });
+      }
     });
-  });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
 });
 
 // Test-Route (Healthcheck für Railway)
