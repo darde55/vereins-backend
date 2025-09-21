@@ -14,12 +14,8 @@ const nodemailer = require('nodemailer');
 const { createEvent } = require('ics');
 
 const app = express();
-
-// Port von Railway oder 3001 lokal
 const port = process.env.PORT || 3001;
 const SECRET = process.env.JWT_SECRET || 'dein_geheimes_jwt_secret';
-
-// Frontend-URL erlauben
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://vereins-frontend.vercel.app';
 
 app.use(cors({
@@ -31,10 +27,10 @@ app.use(express.json());
 // PostgreSQL-Pool einrichten
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false } // für Railway notwendig!
+  ssl: { rejectUnauthorized: false }
 });
 
-// Tabellen initialisieren (nur beim ersten Start notwendig)
+// Tabellen initialisieren
 async function initTables() {
   try {
     await pool.query(`CREATE TABLE IF NOT EXISTS termine (
@@ -64,6 +60,16 @@ async function initTables() {
   }
 }
 initTables();
+
+// Healthcheck-Route für Datenbankverbindung
+app.get('/api/health', async (req, res) => {
+  try {
+    await pool.query('SELECT 1');
+    res.json({ db: 'ok' });
+  } catch (err) {
+    res.status(500).json({ db: 'error', details: err.message });
+  }
+});
 
 // Auth Middleware
 function authMiddleware(req, res, next) {
