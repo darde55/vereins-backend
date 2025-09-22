@@ -157,16 +157,26 @@ app.post('/api/users', authMiddleware, adminOnly, async (req, res) => {
   }
 });
 
-// User bearbeiten (Admin oder User selbst)
+// User bearbeiten (Admin oder User selbst) - Username-Änderung möglich!
 app.put('/api/users/:id', authMiddleware, async (req, res) => {
   const id = Number(req.params.id);
-  const { email, role, password, active } = req.body;
+  const { username, email, role, password, active } = req.body;
   if (req.user.role !== "admin" && req.user.id !== id) {
     return res.status(403).json({ error: "Keine Berechtigung" });
   }
   let fields = [];
   let params = [];
   let paramIdx = 1;
+  let alterUsername = null;
+  if (username && req.user.role === "admin") {
+    // Hole alten Username
+    const result = await pool.query('SELECT username FROM users WHERE id = $1', [id]);
+    alterUsername = result.rows[0]?.username;
+    if (alterUsername && alterUsername !== username) {
+      fields.push(`username = $${paramIdx++}`);
+      params.push(username);
+    }
+  }
   if (email) { fields.push(`email = $${paramIdx++}`); params.push(email); }
   if (password) {
     const hashedPw = await bcrypt.hash(password, 10);
@@ -178,8 +188,15 @@ app.put('/api/users/:id', authMiddleware, async (req, res) => {
   params.push(id);
   try {
     await pool.query(`UPDATE users SET ${fields.join(', ')} WHERE id = $${paramIdx}`, params);
+    // Username-Referenzen in teilnahmen anpassen
+    if (alterUsername && username && alterUsername !== username) {
+      await pool.query('UPDATE teilnahmen SET username = $1 WHERE username = $2', [username, alterUsername]);
+    }
     res.json({ erfolg: true });
   } catch (err) {
+    if ((err.code === '23505') || (err.message && err.message.toLowerCase().includes('unique'))) {
+      return res.status(400).json({ error: 'Username existiert bereits' });
+    }
     return res.status(500).json({ error: err.message });
   }
 });
