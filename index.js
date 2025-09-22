@@ -276,17 +276,41 @@ app.delete('/api/termine/:id', authMiddleware, adminOnly, async (req, res) => {
   }
 });
 
-// Einschreiben für einen Termin mit E-Mail und ICS
+// Nodemailer Transporter korrekt mit Umgebungsvariablen für web.de
 const transporter = nodemailer.createTransport({
   host: "smtp.web.de",
   port: 587,
-  secure: false,
+  secure: false, // Für STARTTLS
   auth: {
-    user: process.env.MAIL_USER || "tsvdienste@web.de",
-    pass: process.env.MAIL_PASS || "TSV_Dienste123",
+    user: process.env.MAIL_USER,
+    pass: process.env.MAIL_PASS
   },
+  tls: {
+    rejectUnauthorized: false
+  }
 });
 
+// Testfunktion für Mailversand beim Start (optional, zum Debuggen)
+/*
+async function testMailVersand() {
+  try {
+    let info = await transporter.sendMail({
+      from: process.env.MAIL_USER,
+      to: process.env.MAIL_USER, // Test an dich selbst
+      subject: "Testmail vom Vereins-Backend",
+      text: "Dies ist eine Testmail vom Node.js-Server."
+    });
+    console.log("Mail erfolgreich gesendet:", info.response);
+  } catch (err) {
+    console.error("Fehler beim Mailversand:", err);
+  }
+}
+if (require.main === module) {
+  testMailVersand();
+}
+*/
+
+// Einschreiben für einen Termin mit E-Mail und ICS
 app.post('/api/termine/:id/einschreiben', authMiddleware, async (req, res) => {
   const termin_id = Number(req.params.id);
   const username = req.user.username;
@@ -322,7 +346,7 @@ app.post('/api/termine/:id/einschreiben', authMiddleware, async (req, res) => {
       title: termin.titel,
       description: termin.beschreibung,
       location: termin.ort || "",
-      organizer: { name: "VereinsApp", email: "noreply@deinserver.de" },
+      organizer: { name: "VereinsApp", email: process.env.MAIL_USER },
     };
     createEvent(event, async (icsError, icsValue) => {
       if (icsError) {
@@ -330,7 +354,7 @@ app.post('/api/termine/:id/einschreiben', authMiddleware, async (req, res) => {
       }
       try {
         await transporter.sendMail({
-          from: process.env.MAIL_USER || 'tsvdienste@web.de',
+          from: process.env.MAIL_USER,
           to: userRow.email,
           subject: `Bestätigung: "${termin.titel}"`,
           text: `Du bist zum Termin "${termin.titel}" am ${dateObj.toLocaleString("de-DE")} angemeldet.`,
@@ -342,6 +366,7 @@ app.post('/api/termine/:id/einschreiben', authMiddleware, async (req, res) => {
         });
         res.json({ erfolg: true });
       } catch (mailErr) {
+        console.error("Fehler beim Mailversand:", mailErr);
         res.json({ erfolg: true, warnung: "Einschreibung ok, aber Mailversand fehlgeschlagen." });
       }
     });
