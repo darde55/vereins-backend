@@ -73,7 +73,7 @@ app.get('/api/termine', authenticateToken, async (req, res) => {
 
     for (let t of termine) {
       const teilnehmerRes = await pool.query(
-        'SELECT username FROM teilnehmer WHERE termin_id = $1',
+        'SELECT username FROM teilnahmen WHERE termin_id = $1',
         [t.id]
       );
       t.teilnehmer = teilnehmerRes.rows.map(r => r.username);
@@ -137,11 +137,11 @@ app.post('/api/termine/:id/teilnehmer', authenticateToken, requireAdmin, async (
       return res.status(404).json({ error: 'User nicht gefunden' });
 
     const teilnehmerResult = await pool.query(
-      'SELECT * FROM teilnehmer WHERE termin_id = $1 AND username = $2', [terminId, username]
+      'SELECT * FROM teilnahmen WHERE termin_id = $1 AND username = $2', [terminId, username]
     );
     if (teilnehmerResult.rows.length === 0) {
       await pool.query(
-        'INSERT INTO teilnehmer (termin_id, username) VALUES ($1, $2)', [terminId, username]
+        'INSERT INTO teilnahmen (termin_id, username) VALUES ($1, $2)', [terminId, username]
       );
     }
 
@@ -157,7 +157,7 @@ app.delete('/api/termine/:id/teilnehmer/:username', authenticateToken, requireAd
   const username = req.params.username;
   try {
     await pool.query(
-      'DELETE FROM teilnehmer WHERE termin_id = $1 AND username = $2',
+      'DELETE FROM teilnahmen WHERE termin_id = $1 AND username = $2',
       [terminId, username]
     );
     res.json({ success: true });
