@@ -3,6 +3,7 @@ const cors = require('cors');
 const { Pool } = require('pg');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
+const sgMail = require('@sendgrid/mail'); // SendGrid importieren
 
 const app = express();
 const port = process.env.PORT || 3001;
@@ -10,6 +11,9 @@ const port = process.env.PORT || 3001;
 // === MIDDLEWARE ===
 app.use(cors());
 app.use(express.json());
+
+// === SENDGRID ===
+sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
 // === DATABASE ===
 const pool = new Pool({
@@ -87,7 +91,6 @@ app.get('/api/termine', authenticateToken, async (req, res) => {
       GROUP BY t.id
       ORDER BY t.datum ASC
     `);
-    // teilnehmer als Array statt JSON-String:
     const termine = result.rows.map(t => ({
       ...t,
       teilnehmer: Array.isArray(t.teilnehmer) ? t.teilnehmer : JSON.parse(t.teilnehmer)
@@ -145,6 +148,33 @@ app.delete('/api/termine/:id', authenticateToken, requireAdmin, async (req, res)
 });
 
 // === TEILNAHME ROUTES ===
+
+// ICS-Datei für Termin generieren (RFC 5545)
+function createICS({ titel, beschreibung, datum, beginn, ende }) {
+  // datum: "YYYY-MM-DD", beginn/ende: "HH:MM"
+  const dtStart = beginn
+    ? datum.replace(/-/g, '') + "T" + beginn.replace(":", "") + "00"
+    : datum.replace(/-/g, '');
+  const dtEnd = ende
+    ? datum.replace(/-/g, '') + "T" + ende.replace(":", "") + "00"
+    : datum.replace(/-/g, '');
+
+  return [
+    "BEGIN:VCALENDAR",
+    "VERSION:2.0",
+    "PRODID:-//Vereinsverwaltung//EN",
+    "BEGIN:VEVENT",
+    `UID:${Math.random().toString(36).substring(2)}@vereinsverwaltung.de`,
+    `DTSTAMP:${new Date().toISOString().replace(/[-:]/g, "").split(".")[0]}Z`,
+    `DTSTART:${dtStart}`,
+    `DTEND:${dtEnd}`,
+    `SUMMARY:${titel}`,
+    `DESCRIPTION:${beschreibung || ""}`,
+    "END:VEVENT",
+    "END:VCALENDAR"
+  ].join("\r\n");
+}
+
 // Einschreiben
 app.post('/api/termine/:id/teilnehmer', authenticateToken, async (req, res) => {
   const username = req.user.username;
@@ -162,6 +192,37 @@ app.post('/api/termine/:id/teilnehmer', authenticateToken, async (req, res) => {
       'INSERT INTO teilnahmen (termin_id, username) VALUES ($1, $2)',
       [termin_id, username]
     );
+
+    // Hole User-Email und Termindaten
+    const userResult = await pool.query('SELECT email FROM users WHERE username = $1', [username]);
+    const terminResult = await pool.query('SELECT * FROM termine WHERE id = $1', [termin_id]);
+    const userEmail = userResult.rows[0]?.email;
+    const termin = terminResult.rows[0];
+
+    // E-Mail mit ICS-Anhang senden
+    if (userEmail && termin) {
+      const icsString = createICS(termin);
+      const msg = {
+        to: userEmail,
+        from: 'noreply@deinverein.de', // <== ERSETZEN durch verifizierte absender adresse!
+        subject: 'Du bist eingeschrieben',
+        text: `Du bist für den Termin "${termin.titel}" eingeschrieben!\nIm Anhang findest du die Kalenderdatei.`,
+        attachments: [
+          {
+            content: Buffer.from(icsString).toString('base64'),
+            filename: "termin.ics",
+            type: "text/calendar",
+            disposition: "attachment"
+          }
+        ]
+      };
+      try {
+        await sgMail.send(msg);
+      } catch (err) {
+        console.error("SendGrid-Fehler:", err.response ? err.response.body : err);
+      }
+    }
+
     res.json({ success: true });
   } catch (e) {
     res.status(500).json({ error: 'Fehler beim Einschreiben' });
