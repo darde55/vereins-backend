@@ -3,32 +3,16 @@ const app = express();
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
 const { v4: uuidv4 } = require('uuid');
+const { Pool } = require('pg');
 
 app.use(cors());
 app.use(express.json());
 
-// Beispiel: Datenhaltung im Speicher (ersetze durch DB in Produktion)
-let users = [
-  // Beispieluser
-  { username: 'admin', password: 'admin', role: 'admin', score: 100 },
-  { username: 'max', password: 'max', role: 'user', score: 50 },
-];
-let termine = [
-  // Beispieltermin
-  {
-    id: '1',
-    titel: 'Schiedsrichter',
-    datum: '2025-09-26',
-    beginn: '10:00',
-    ende: '12:00',
-    beschreibung: 'Schiedsrichtertermin',
-    anzahl: 2,
-    teilnehmer: ['max'],
-    score: 5,
-    ansprechpartner_name: 'Max Mustermann',
-    ansprechpartner_mail: 'max@example.com'
-  }
-];
+// PostgreSQL Pool (Railway/Postgres)
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
+});
 
 // Hilfsfunktion: Authentifizierung & Admin-Check
 function authenticateToken(req, res, next) {
@@ -41,68 +25,140 @@ function authenticateToken(req, res, next) {
     next();
   });
 }
-function requireAdmin(req, res, next) {
-  const user = users.find(u => u.username === req.user.username);
-  if (!user || user.role !== 'admin') return res.sendStatus(403);
-  next();
+async function requireAdmin(req, res, next) {
+  try {
+    const result = await pool.query(
+      'SELECT role FROM users WHERE username = $1',
+      [req.user.username]
+    );
+    if (result.rows.length === 0 || result.rows[0].role !== 'admin')
+      return res.sendStatus(403);
+    next();
+  } catch {
+    res.sendStatus(500);
+  }
 }
 
-// --- API-Routen ---
-
-// Alle Termine abrufen
-app.get('/api/termine', authenticateToken, (req, res) => {
-  res.json(termine);
+// --- LOGIN ---
+app.post('/api/login', async (req, res) => {
+  const { username, password } = req.body;
+  try {
+    const result = await pool.query(
+      'SELECT username, password, role, score FROM users WHERE username = $1 AND password = $2',
+      [username, password]
+    );
+    if (result.rows.length === 0)
+      return res.status(401).json({ error: 'Login fehlgeschlagen' });
+    const user = result.rows[0];
+    const token = jwt.sign({ username: user.username }, 'SECRET');
+    res.json({ token, username: user.username, role: user.role });
+  } catch (err) {
+    console.error('Fehler bei Login:', err);
+    res.status(500).json({ error: 'Fehler beim Login' });
+  }
 });
 
-// Termin-Teilnehmer HINZUFÜGEN (nur Admin)
-app.post('/api/termine/:id/teilnehmer', authenticateToken, requireAdmin, (req, res) => {
-  const termin = termine.find(t => t.id === req.params.id);
-  if (!termin) return res.status(404).json({ error: 'Termin nicht gefunden' });
+// --- NUTZERLISTE ---
+app.get('/api/users', authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT username, score, role FROM users'
+    );
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: 'Fehler beim Abrufen der Nutzer' });
+  }
+});
+
+// --- TERMINE-LISTE ---
+app.get('/api/termine', authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM termine');
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: 'Fehler beim Abrufen der Termine' });
+  }
+});
+
+// --- TERMIN-TEILNEHMER HINZUFÜGEN (nur Admin) ---
+app.post('/api/termine/:id/teilnehmer', authenticateToken, requireAdmin, async (req, res) => {
+  const terminId = req.params.id;
   const { username } = req.body;
   if (!username) return res.status(400).json({ error: 'Username erforderlich' });
-  if (!users.find(u => u.username === username)) return res.status(404).json({ error: 'User nicht gefunden' });
-  if (!termin.teilnehmer.includes(username)) {
-    termin.teilnehmer.push(username);
+  try {
+    // Existiert der Termin?
+    const termin = await pool.query('SELECT * FROM termine WHERE id = $1', [terminId]);
+    if (termin.rows.length === 0)
+      return res.status(404).json({ error: 'Termin nicht gefunden' });
+
+    // Existiert der User?
+    const user = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
+    if (user.rows.length === 0)
+      return res.status(404).json({ error: 'User nicht gefunden' });
+
+    // Schon Teilnehmer?
+    const teilnehmerResult = await pool.query(
+      'SELECT * FROM teilnehmer WHERE termin_id = $1 AND username = $2', [terminId, username]
+    );
+    if (teilnehmerResult.rows.length === 0) {
+      await pool.query(
+        'INSERT INTO teilnehmer (termin_id, username) VALUES ($1, $2)', [terminId, username]
+      );
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Fehler beim Hinzufügen des Teilnehmers' });
   }
-  res.json({ success: true, termin });
 });
 
-// Termin-Teilnehmer ENTFERNEN (nur Admin)
-app.delete('/api/termine/:id/teilnehmer/:username', authenticateToken, requireAdmin, (req, res) => {
-  const termin = termine.find(t => t.id === req.params.id);
-  if (!termin) return res.status(404).json({ error: 'Termin nicht gefunden' });
-  termin.teilnehmer = termin.teilnehmer.filter(u => u !== req.params.username);
-  res.json({ success: true, termin });
-});
-
-// Termin-ANZAHL BEARBEITEN (nur Admin)
-app.patch('/api/termine/:id', authenticateToken, requireAdmin, (req, res) => {
-  const termin = termine.find(t => t.id === req.params.id);
-  if (!termin) return res.status(404).json({ error: 'Termin nicht gefunden' });
-  if (typeof req.body.anzahl === 'number' && req.body.anzahl > 0) {
-    termin.anzahl = req.body.anzahl;
-    res.json({ success: true, termin });
-  } else {
-    res.status(400).json({ error: 'Ungültige Anzahl' });
+// --- TERMIN-TEILNEHMER ENTFERNEN (nur Admin) ---
+app.delete('/api/termine/:id/teilnehmer/:username', authenticateToken, requireAdmin, async (req, res) => {
+  const terminId = req.params.id;
+  const username = req.params.username;
+  try {
+    await pool.query(
+      'DELETE FROM teilnehmer WHERE termin_id = $1 AND username = $2',
+      [terminId, username]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Fehler beim Entfernen des Teilnehmers' });
   }
 });
 
-// Nutzer abrufen (für Score, Rollen etc.)
-app.get('/api/users', authenticateToken, (req, res) => {
-  res.json(users.map(u => ({
-    username: u.username,
-    score: u.score,
-    role: u.role
-  })));
+// --- TERMIN ANZAHL BEARBEITEN (nur Admin) ---
+app.patch('/api/termine/:id', authenticateToken, requireAdmin, async (req, res) => {
+  const terminId = req.params.id;
+  const { anzahl } = req.body;
+  if (typeof anzahl !== 'number' || anzahl <= 0)
+    return res.status(400).json({ error: 'Ungültige Anzahl' });
+  try {
+    await pool.query(
+      'UPDATE termine SET anzahl = $1 WHERE id = $2',
+      [anzahl, terminId]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Fehler beim Aktualisieren der Anzahl' });
+  }
 });
 
-// Beispiel-Login (nur zu Demo-Zwecken!)
-app.post('/api/login', (req, res) => {
-  const { username, password } = req.body;
-  const user = users.find(u => u.username === username && u.password === password);
-  if (!user) return res.status(401).json({ error: 'Login fehlgeschlagen' });
-  const token = jwt.sign({ username: user.username }, 'SECRET');
-  res.json({ token, username: user.username, role: user.role });
+// --- TERMINE INKL. TEILNEHMER (Optional) ---
+app.get('/api/termine-mit-teilnehmer', authenticateToken, async (req, res) => {
+  try {
+    const termineResult = await pool.query('SELECT * FROM termine');
+    const termine = termineResult.rows;
+    for (let t of termine) {
+      const teilnehmerRes = await pool.query(
+        'SELECT username FROM teilnehmer WHERE termin_id = $1', [t.id]
+      );
+      t.teilnehmer = teilnehmerRes.rows.map(r => r.username);
+    }
+    res.json(termine);
+  } catch (err) {
+    res.status(500).json({ error: 'Fehler beim Abrufen der Termine inkl. Teilnehmer' });
+  }
 });
 
 const PORT = process.env.PORT || 3001;
