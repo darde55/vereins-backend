@@ -3,7 +3,7 @@ const cors = require('cors');
 const { Pool } = require('pg');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
-const sgMail = require('@sendgrid/mail'); // SendGrid importieren
+const sgMail = require('@sendgrid/mail');
 
 const app = express();
 const port = process.env.PORT || 3001;
@@ -13,7 +13,7 @@ app.use(cors());
 app.use(express.json());
 
 // === SENDGRID ===
-sgMail.setApiKey(process.env.SENDGRID_API_KEY);
+sgMail.setApiKey(process.env.SENDGRID_API_KEY); // Setze hier deinen API Key als Umgebungsvariable
 
 // === DATABASE ===
 const pool = new Pool({
@@ -151,7 +151,6 @@ app.delete('/api/termine/:id', authenticateToken, requireAdmin, async (req, res)
 
 // ICS-Datei für Termin generieren (RFC 5545)
 function createICS({ titel, beschreibung, datum, beginn, ende }) {
-  // datum: "YYYY-MM-DD", beginn/ende: "HH:MM"
   const dtStart = beginn
     ? datum.replace(/-/g, '') + "T" + beginn.replace(":", "") + "00"
     : datum.replace(/-/g, '');
@@ -204,7 +203,7 @@ app.post('/api/termine/:id/teilnehmer', authenticateToken, async (req, res) => {
       const icsString = createICS(termin);
       const msg = {
         to: userEmail,
-        from: 'noreply@deinverein.de', // <== ERSETZEN durch verifizierte absender adresse!
+        from: 'tsvdienste@web.de', // Diese Adresse MUSS bei SendGrid verifiziert sein!
         subject: 'Du bist eingeschrieben',
         text: `Du bist für den Termin "${termin.titel}" eingeschrieben!\nIm Anhang findest du die Kalenderdatei.`,
         attachments: [
