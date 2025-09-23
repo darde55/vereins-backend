@@ -3,7 +3,7 @@ const app = express();
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
 const { Pool } = require('pg');
-const bcrypt = require('bcrypt'); // Wichtig: bcrypt installieren!
+const bcrypt = require('bcrypt'); // Wichtig: bcrypt installiert lassen!
 
 app.use(cors());
 app.use(express.json());
@@ -46,7 +46,6 @@ app.post('/api/login', async (req, res) => {
     if (result.rows.length === 0)
       return res.status(401).json({ error: 'Login fehlgeschlagen' });
     const user = result.rows[0];
-    // Vergleiche das eingegebene Passwort mit dem Hash aus der DB
     const valid = await bcrypt.compare(password, user.password);
     if (!valid) return res.status(401).json({ error: 'Login fehlgeschlagen' });
     const token = jwt.sign({ username: user.username }, 'SECRET');
@@ -85,23 +84,58 @@ app.get('/api/termine', authenticateToken, async (req, res) => {
   }
 });
 
+// TERMIN ANLEGEN (nur Admin)
+app.post('/api/termine', authenticateToken, requireAdmin, async (req, res) => {
+  const {
+    titel,
+    datum,
+    beginn,
+    ende,
+    beschreibung,
+    anzahl,
+    score,
+    ansprechpartner_name,
+    ansprechpartner_mail
+  } = req.body;
+  if (!titel || !datum || !anzahl)
+    return res.status(400).json({ error: 'Titel, Datum und Anzahl sind Pflichtfelder' });
+  try {
+    await pool.query(
+      `INSERT INTO termine 
+        (titel, datum, beginn, ende, beschreibung, anzahl, score, ansprechpartner_name, ansprechpartner_mail)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+      [
+        titel,
+        datum,
+        beginn || null,
+        ende || null,
+        beschreibung || null,
+        anzahl,
+        score || 0,
+        ansprechpartner_name || null,
+        ansprechpartner_mail || null
+      ]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Fehler beim Anlegen des Termins' });
+  }
+});
+
 // Teilnehmer HINZUFÜGEN (nur Admin)
 app.post('/api/termine/:id/teilnehmer', authenticateToken, requireAdmin, async (req, res) => {
   const terminId = req.params.id;
   const { username } = req.body;
   if (!username) return res.status(400).json({ error: 'Username erforderlich' });
   try {
-    // Existiert der Termin?
     const termin = await pool.query('SELECT * FROM termine WHERE id = $1', [terminId]);
     if (termin.rows.length === 0)
       return res.status(404).json({ error: 'Termin nicht gefunden' });
 
-    // Existiert der User?
     const user = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
     if (user.rows.length === 0)
       return res.status(404).json({ error: 'User nicht gefunden' });
 
-    // Schon Teilnehmer?
     const teilnehmerResult = await pool.query(
       'SELECT * FROM teilnehmer WHERE termin_id = $1 AND username = $2', [terminId, username]
     );
