@@ -330,7 +330,7 @@ app.post('/api/termine/:id/einschreiben', authMiddleware, async (req, res) => {
           attachments: [
             {
               filename: 'termin.ics',
-              content: icsValue.toString('base64'),
+              content: Buffer.from(icsValue).toString('base64'), // Korrigiert: base64-Encoding
               type: 'text/calendar',
               disposition: 'attachment',
               content_id: 'terminics'
