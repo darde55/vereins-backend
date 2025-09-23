@@ -3,6 +3,7 @@ const app = express();
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
 const { Pool } = require('pg');
+const bcrypt = require('bcrypt'); // Wichtig: bcrypt installieren!
 
 app.use(cors());
 app.use(express.json());
@@ -34,17 +35,20 @@ async function requireAdmin(req, res, next) {
   }
 }
 
-// LOGIN gegen die Datenbank
+// LOGIN gegen die Datenbank (mit bcrypt!)
 app.post('/api/login', async (req, res) => {
   const { username, password } = req.body;
   try {
     const result = await pool.query(
-      'SELECT username, role, score FROM users WHERE username = $1 AND password = $2',
-      [username, password]
+      'SELECT username, password, role, score FROM users WHERE username = $1',
+      [username]
     );
     if (result.rows.length === 0)
       return res.status(401).json({ error: 'Login fehlgeschlagen' });
     const user = result.rows[0];
+    // Vergleiche das eingegebene Passwort mit dem Hash aus der DB
+    const valid = await bcrypt.compare(password, user.password);
+    if (!valid) return res.status(401).json({ error: 'Login fehlgeschlagen' });
     const token = jwt.sign({ username: user.username }, 'SECRET');
     res.json({ token, username: user.username, role: user.role });
   } catch (err) {
