@@ -10,8 +10,11 @@ const cors = require('cors');
 const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const nodemailer = require('nodemailer');
 const { createEvent } = require('ics');
+
+// === SENDGRID-Integration ===
+const sgMail = require('@sendgrid/mail');
+sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
 const app = express();
 const port = process.env.PORT || 3001;
@@ -276,41 +279,7 @@ app.delete('/api/termine/:id', authMiddleware, adminOnly, async (req, res) => {
   }
 });
 
-// Nodemailer Transporter korrekt mit Umgebungsvariablen für web.de
-const transporter = nodemailer.createTransport({
-  host: "smtp.web.de",
-  port: 587,
-  secure: false, // Für STARTTLS
-  auth: {
-    user: process.env.MAIL_USER,
-    pass: process.env.MAIL_PASS
-  },
-  tls: {
-    rejectUnauthorized: false
-  }
-});
-
-// Testfunktion für Mailversand beim Start (optional, zum Debuggen)
-/*
-async function testMailVersand() {
-  try {
-    let info = await transporter.sendMail({
-      from: process.env.MAIL_USER,
-      to: process.env.MAIL_USER, // Test an dich selbst
-      subject: "Testmail vom Vereins-Backend",
-      text: "Dies ist eine Testmail vom Node.js-Server."
-    });
-    console.log("Mail erfolgreich gesendet:", info.response);
-  } catch (err) {
-    console.error("Fehler beim Mailversand:", err);
-  }
-}
-if (require.main === module) {
-  testMailVersand();
-}
-*/
-
-// Einschreiben für einen Termin mit E-Mail und ICS
+// Einschreiben für einen Termin mit E-Mail und ICS (über SendGrid)
 app.post('/api/termine/:id/einschreiben', authMiddleware, async (req, res) => {
   const termin_id = Number(req.params.id);
   const username = req.user.username;
@@ -346,27 +315,31 @@ app.post('/api/termine/:id/einschreiben', authMiddleware, async (req, res) => {
       title: termin.titel,
       description: termin.beschreibung,
       location: termin.ort || "",
-      organizer: { name: "VereinsApp", email: process.env.MAIL_USER },
+      organizer: { name: "VereinsApp", email: process.env.MAIL_FROM },
     };
     createEvent(event, async (icsError, icsValue) => {
       if (icsError) {
         return res.json({ erfolg: true, warnung: "Einschreibung ok, aber keine Kalenderdatei" });
       }
       try {
-        await transporter.sendMail({
-          from: process.env.MAIL_USER,
+        await sgMail.send({
           to: userRow.email,
+          from: process.env.MAIL_FROM, // Deine bestätigte SendGrid-Absenderadresse!
           subject: `Bestätigung: "${termin.titel}"`,
           text: `Du bist zum Termin "${termin.titel}" am ${dateObj.toLocaleString("de-DE")} angemeldet.`,
-          icalEvent: {
-            filename: 'termin.ics',
-            method: 'REQUEST',
-            content: icsValue,
-          }
+          attachments: [
+            {
+              filename: 'termin.ics',
+              content: icsValue.toString('base64'),
+              type: 'text/calendar',
+              disposition: 'attachment',
+              content_id: 'terminics'
+            }
+          ]
         });
         res.json({ erfolg: true });
       } catch (mailErr) {
-        console.error("Fehler beim Mailversand:", mailErr);
+        console.error("Fehler beim Mailversand (SendGrid):", mailErr?.response?.body || mailErr);
         res.json({ erfolg: true, warnung: "Einschreibung ok, aber Mailversand fehlgeschlagen." });
       }
     });
