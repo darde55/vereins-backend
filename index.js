@@ -7,10 +7,9 @@ const { Pool } = require('pg');
 app.use(cors());
 app.use(express.json());
 
-// PostgreSQL Pool (Railway/Postgres)
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
+  connectionString: "postgresql://postgres:pekwzYpGbWUbiXFVnPmHdwuobFuWXGHR@metro.proxy.rlwy.net:56329/railway",
+  ssl: { rejectUnauthorized: false }
 });
 
 // JWT-Auth Middleware
@@ -26,10 +25,7 @@ function authenticateToken(req, res, next) {
 }
 async function requireAdmin(req, res, next) {
   try {
-    const result = await pool.query(
-      'SELECT role FROM users WHERE username = $1',
-      [req.user.username]
-    );
+    const result = await pool.query('SELECT role FROM users WHERE username = $1', [req.user.username]);
     if (result.rows.length === 0 || result.rows[0].role !== 'admin')
       return res.sendStatus(403);
     next();
@@ -38,7 +34,7 @@ async function requireAdmin(req, res, next) {
   }
 }
 
-// --- LOGIN ---
+// LOGIN gegen die Datenbank
 app.post('/api/login', async (req, res) => {
   const { username, password } = req.body;
   try {
@@ -56,19 +52,17 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
-// --- Nutzerliste aus Datenbank ---
+// Nutzer-Liste
 app.get('/api/users', authenticateToken, async (req, res) => {
   try {
-    const result = await pool.query(
-      'SELECT username, score, role FROM users'
-    );
+    const result = await pool.query('SELECT username, score, role FROM users');
     res.json(result.rows);
   } catch (err) {
     res.status(500).json({ error: 'Fehler beim Abrufen der Nutzer' });
   }
 });
 
-// --- Termine mit Teilnehmern aus DB ---
+// Termine inkl. Teilnehmer
 app.get('/api/termine', authenticateToken, async (req, res) => {
   try {
     const termineResult = await pool.query('SELECT * FROM termine');
@@ -87,7 +81,7 @@ app.get('/api/termine', authenticateToken, async (req, res) => {
   }
 });
 
-// --- Termin-Teilnehmer HINZUFÜGEN (nur Admin) ---
+// Teilnehmer HINZUFÜGEN (nur Admin)
 app.post('/api/termine/:id/teilnehmer', authenticateToken, requireAdmin, async (req, res) => {
   const terminId = req.params.id;
   const { username } = req.body;
@@ -119,7 +113,7 @@ app.post('/api/termine/:id/teilnehmer', authenticateToken, requireAdmin, async (
   }
 });
 
-// --- Termin-Teilnehmer ENTFERNEN (nur Admin) ---
+// Teilnehmer ENTFERNEN (nur Admin)
 app.delete('/api/termine/:id/teilnehmer/:username', authenticateToken, requireAdmin, async (req, res) => {
   const terminId = req.params.id;
   const username = req.params.username;
@@ -134,7 +128,7 @@ app.delete('/api/termine/:id/teilnehmer/:username', authenticateToken, requireAd
   }
 });
 
-// --- Termin ANZAHL BEARBEITEN (nur Admin) ---
+// Termin ANZAHL BEARBEITEN (nur Admin)
 app.patch('/api/termine/:id', authenticateToken, requireAdmin, async (req, res) => {
   const terminId = req.params.id;
   const { anzahl } = req.body;
