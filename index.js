@@ -33,13 +33,15 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-// Tabellen initialisieren
+// Tabellen initialisieren (JETZT MIT beginn UND ende)
 async function initTables() {
   try {
     await pool.query(`CREATE TABLE IF NOT EXISTS termine (
       id SERIAL PRIMARY KEY,
       titel TEXT NOT NULL,
       datum TEXT NOT NULL,
+      beginn TEXT,
+      ende TEXT,
       beschreibung TEXT,
       anzahl INTEGER NOT NULL,
       stichtag TEXT,
@@ -120,8 +122,8 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
-// Alle User anzeigen (Admin)
-app.get('/api/users', authMiddleware, adminOnly, async (req, res) => {
+// Alle User anzeigen (Score-Liste für alle User, nicht nur Admin!)
+app.get('/api/users', authMiddleware, async (req, res) => {
   try {
     const result = await pool.query('SELECT id, username, email, role, active, score FROM users');
     res.json(result.rows);
@@ -227,7 +229,7 @@ app.delete('/api/users/:id', authMiddleware, adminOnly, async (req, res) => {
 });
 
 // Termine abrufen (mit Teilnehmern)
-app.get('/api/termine', async (req, res) => {
+app.get('/api/termine', authMiddleware, async (req, res) => {
   try {
     const termineResult = await pool.query('SELECT * FROM termine');
     const teilnahmenResult = await pool.query('SELECT * FROM teilnahmen');
@@ -243,17 +245,19 @@ app.get('/api/termine', async (req, res) => {
 
 // Neuen Termin anlegen (nur Admin)
 app.post('/api/termine', authMiddleware, adminOnly, async (req, res) => {
-  const { titel, datum, beschreibung, anzahl, stichtag, ansprechpartner_name, ansprechpartner_mail, score } = req.body;
+  const { titel, datum, beginn, ende, beschreibung, anzahl, stichtag, ansprechpartner_name, ansprechpartner_mail, score } = req.body;
   if (!titel || !datum || !anzahl) {
     return res.status(400).json({ error: 'Titel, Datum und Anzahl erforderlich' });
   }
   try {
     const result = await pool.query(
-      `INSERT INTO termine (titel, datum, beschreibung, anzahl, stichtag, ansprechpartner_name, ansprechpartner_mail, score)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+      `INSERT INTO termine (titel, datum, beginn, ende, beschreibung, anzahl, stichtag, ansprechpartner_name, ansprechpartner_mail, score)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
       [
         titel,
         datum,
+        beginn || null,
+        ende || null,
         beschreibung,
         anzahl,
         stichtag || null,
@@ -271,14 +275,16 @@ app.post('/api/termine', authMiddleware, adminOnly, async (req, res) => {
 // Termin bearbeiten (nur Admin)
 app.put('/api/termine/:id', authMiddleware, adminOnly, async (req, res) => {
   const termin_id = Number(req.params.id);
-  const { titel, datum, beschreibung, anzahl, stichtag, ansprechpartner_name, ansprechpartner_mail, score } = req.body;
+  const { titel, datum, beginn, ende, beschreibung, anzahl, stichtag, ansprechpartner_name, ansprechpartner_mail, score } = req.body;
   try {
     await pool.query(
-      `UPDATE termine SET titel = $1, datum = $2, beschreibung = $3, anzahl = $4,
-         stichtag = $5, ansprechpartner_name = $6, ansprechpartner_mail = $7, score = $8 WHERE id = $9`,
+      `UPDATE termine SET titel = $1, datum = $2, beginn = $3, ende = $4, beschreibung = $5, anzahl = $6,
+         stichtag = $7, ansprechpartner_name = $8, ansprechpartner_mail = $9, score = $10 WHERE id = $11`,
       [
         titel,
         datum,
+        beginn || null,
+        ende || null,
         beschreibung,
         anzahl,
         stichtag || null,
@@ -344,8 +350,9 @@ app.post('/api/termine/:id/einschreiben', authMiddleware, async (req, res) => {
         dateObj.getFullYear(),
         dateObj.getMonth() + 1,
         dateObj.getDate(),
-        dateObj.getHours(),
-        dateObj.getMinutes(),
+        // Optional: beginn als Uhrzeit setzen, falls vorhanden
+        termin.beginn ? Number((termin.beginn || '00:00').split(":")[0]) : 0,
+        termin.beginn ? Number((termin.beginn || '00:00').split(":")[1]) : 0,
       ],
       duration: { hours: 1 },
       title: termin.titel,
