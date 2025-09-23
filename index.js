@@ -2,7 +2,6 @@ const express = require('express');
 const app = express();
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
-const { v4: uuidv4 } = require('uuid');
 const { Pool } = require('pg');
 
 app.use(cors());
@@ -14,7 +13,7 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false },
 });
 
-// Hilfsfunktion: Authentifizierung & Admin-Check
+// JWT-Auth Middleware
 function authenticateToken(req, res, next) {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
@@ -44,7 +43,7 @@ app.post('/api/login', async (req, res) => {
   const { username, password } = req.body;
   try {
     const result = await pool.query(
-      'SELECT username, password, role, score FROM users WHERE username = $1 AND password = $2',
+      'SELECT username, role, score FROM users WHERE username = $1 AND password = $2',
       [username, password]
     );
     if (result.rows.length === 0)
@@ -53,12 +52,11 @@ app.post('/api/login', async (req, res) => {
     const token = jwt.sign({ username: user.username }, 'SECRET');
     res.json({ token, username: user.username, role: user.role });
   } catch (err) {
-    console.error('Fehler bei Login:', err);
     res.status(500).json({ error: 'Fehler beim Login' });
   }
 });
 
-// --- NUTZERLISTE ---
+// --- Nutzerliste aus Datenbank ---
 app.get('/api/users', authenticateToken, async (req, res) => {
   try {
     const result = await pool.query(
@@ -70,17 +68,26 @@ app.get('/api/users', authenticateToken, async (req, res) => {
   }
 });
 
-// --- TERMINE-LISTE ---
+// --- Termine mit Teilnehmern aus DB ---
 app.get('/api/termine', authenticateToken, async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM termine');
-    res.json(result.rows);
+    const termineResult = await pool.query('SELECT * FROM termine');
+    const termine = termineResult.rows;
+
+    for (let t of termine) {
+      const teilnehmerRes = await pool.query(
+        'SELECT username FROM teilnehmer WHERE termin_id = $1',
+        [t.id]
+      );
+      t.teilnehmer = teilnehmerRes.rows.map(r => r.username);
+    }
+    res.json(termine);
   } catch (err) {
     res.status(500).json({ error: 'Fehler beim Abrufen der Termine' });
   }
 });
 
-// --- TERMIN-TEILNEHMER HINZUFÜGEN (nur Admin) ---
+// --- Termin-Teilnehmer HINZUFÜGEN (nur Admin) ---
 app.post('/api/termine/:id/teilnehmer', authenticateToken, requireAdmin, async (req, res) => {
   const terminId = req.params.id;
   const { username } = req.body;
@@ -112,7 +119,7 @@ app.post('/api/termine/:id/teilnehmer', authenticateToken, requireAdmin, async (
   }
 });
 
-// --- TERMIN-TEILNEHMER ENTFERNEN (nur Admin) ---
+// --- Termin-Teilnehmer ENTFERNEN (nur Admin) ---
 app.delete('/api/termine/:id/teilnehmer/:username', authenticateToken, requireAdmin, async (req, res) => {
   const terminId = req.params.id;
   const username = req.params.username;
@@ -127,7 +134,7 @@ app.delete('/api/termine/:id/teilnehmer/:username', authenticateToken, requireAd
   }
 });
 
-// --- TERMIN ANZAHL BEARBEITEN (nur Admin) ---
+// --- Termin ANZAHL BEARBEITEN (nur Admin) ---
 app.patch('/api/termine/:id', authenticateToken, requireAdmin, async (req, res) => {
   const terminId = req.params.id;
   const { anzahl } = req.body;
@@ -141,23 +148,6 @@ app.patch('/api/termine/:id', authenticateToken, requireAdmin, async (req, res) 
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: 'Fehler beim Aktualisieren der Anzahl' });
-  }
-});
-
-// --- TERMINE INKL. TEILNEHMER (Optional) ---
-app.get('/api/termine-mit-teilnehmer', authenticateToken, async (req, res) => {
-  try {
-    const termineResult = await pool.query('SELECT * FROM termine');
-    const termine = termineResult.rows;
-    for (let t of termine) {
-      const teilnehmerRes = await pool.query(
-        'SELECT username FROM teilnehmer WHERE termin_id = $1', [t.id]
-      );
-      t.teilnehmer = teilnehmerRes.rows.map(r => r.username);
-    }
-    res.json(termine);
-  } catch (err) {
-    res.status(500).json({ error: 'Fehler beim Abrufen der Termine inkl. Teilnehmer' });
   }
 });
 
