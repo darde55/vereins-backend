@@ -41,7 +41,11 @@ async function initTables() {
       titel TEXT NOT NULL,
       datum TEXT NOT NULL,
       beschreibung TEXT,
-      anzahl INTEGER NOT NULL
+      anzahl INTEGER NOT NULL,
+      stichtag TEXT,
+      ansprechpartner_name TEXT,
+      ansprechpartner_mail TEXT,
+      score INTEGER DEFAULT 0
     )`);
     await pool.query(`CREATE TABLE IF NOT EXISTS users (
       id SERIAL PRIMARY KEY,
@@ -49,7 +53,8 @@ async function initTables() {
       password TEXT NOT NULL,
       role TEXT NOT NULL CHECK (role IN ('admin', 'user')),
       email TEXT,
-      active BOOLEAN NOT NULL DEFAULT true
+      active BOOLEAN NOT NULL DEFAULT true,
+      score INTEGER DEFAULT 0
     )`);
     await pool.query(`CREATE TABLE IF NOT EXISTS teilnahmen (
       id SERIAL PRIMARY KEY,
@@ -118,7 +123,7 @@ app.post('/api/login', async (req, res) => {
 // Alle User anzeigen (Admin)
 app.get('/api/users', authMiddleware, adminOnly, async (req, res) => {
   try {
-    const result = await pool.query('SELECT id, username, email, role, active FROM users');
+    const result = await pool.query('SELECT id, username, email, role, active, score FROM users');
     res.json(result.rows);
   } catch (err) {
     return res.status(500).json({ error: err.message });
@@ -132,7 +137,7 @@ app.get('/api/users/:id', authMiddleware, async (req, res) => {
     return res.status(403).json({ error: "Keine Berechtigung" });
   }
   try {
-    const result = await pool.query('SELECT id, username, email, role, active FROM users WHERE id = $1', [id]);
+    const result = await pool.query('SELECT id, username, email, role, active, score FROM users WHERE id = $1', [id]);
     const user = result.rows[0];
     if (!user) return res.status(404).json({ error: "User nicht gefunden" });
     res.json(user);
@@ -148,7 +153,7 @@ app.post('/api/users', authMiddleware, adminOnly, async (req, res) => {
   const hashedPw = await bcrypt.hash(password, 10);
   try {
     const result = await pool.query(
-      'INSERT INTO users (username, password, role, email) VALUES ($1, $2, $3, $4) RETURNING id, username, role, email',
+      'INSERT INTO users (username, password, role, email) VALUES ($1, $2, $3, $4) RETURNING id, username, role, email, score',
       [username, hashedPw, role, email]
     );
     res.json(result.rows[0]);
@@ -163,7 +168,7 @@ app.post('/api/users', authMiddleware, adminOnly, async (req, res) => {
 // User bearbeiten (Admin oder User selbst) - Username-Änderung möglich!
 app.put('/api/users/:id', authMiddleware, async (req, res) => {
   const id = Number(req.params.id);
-  const { username, email, role, password, active } = req.body;
+  const { username, email, role, password, active, score } = req.body;
   if (req.user.role !== "admin" && req.user.id !== id) {
     return res.status(403).json({ error: "Keine Berechtigung" });
   }
@@ -187,6 +192,7 @@ app.put('/api/users/:id', authMiddleware, async (req, res) => {
   }
   if (role && req.user.role === "admin") { fields.push(`role = $${paramIdx++}`); params.push(role); }
   if (typeof active !== 'undefined' && req.user.role === "admin") { fields.push(`active = $${paramIdx++}`); params.push(active ? true : false); }
+  if (typeof score !== 'undefined' && req.user.role === "admin") { fields.push(`score = $${paramIdx++}`); params.push(Number(score)); }
   if (fields.length === 0) return res.status(400).json({ error: "Keine Felder zu ändern übergeben" });
   params.push(id);
   try {
@@ -237,14 +243,24 @@ app.get('/api/termine', async (req, res) => {
 
 // Neuen Termin anlegen (nur Admin)
 app.post('/api/termine', authMiddleware, adminOnly, async (req, res) => {
-  const { titel, datum, beschreibung, anzahl } = req.body;
+  const { titel, datum, beschreibung, anzahl, stichtag, ansprechpartner_name, ansprechpartner_mail, score } = req.body;
   if (!titel || !datum || !anzahl) {
     return res.status(400).json({ error: 'Titel, Datum und Anzahl erforderlich' });
   }
   try {
     const result = await pool.query(
-      'INSERT INTO termine (titel, datum, beschreibung, anzahl) VALUES ($1, $2, $3, $4) RETURNING *',
-      [titel, datum, beschreibung, anzahl]
+      `INSERT INTO termine (titel, datum, beschreibung, anzahl, stichtag, ansprechpartner_name, ansprechpartner_mail, score)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+      [
+        titel,
+        datum,
+        beschreibung,
+        anzahl,
+        stichtag || null,
+        ansprechpartner_name || null,
+        ansprechpartner_mail || null,
+        typeof score !== 'undefined' ? Number(score) : 0
+      ]
     );
     res.json(result.rows[0]);
   } catch (err) {
@@ -255,11 +271,22 @@ app.post('/api/termine', authMiddleware, adminOnly, async (req, res) => {
 // Termin bearbeiten (nur Admin)
 app.put('/api/termine/:id', authMiddleware, adminOnly, async (req, res) => {
   const termin_id = Number(req.params.id);
-  const { titel, datum, beschreibung, anzahl } = req.body;
+  const { titel, datum, beschreibung, anzahl, stichtag, ansprechpartner_name, ansprechpartner_mail, score } = req.body;
   try {
     await pool.query(
-      'UPDATE termine SET titel = $1, datum = $2, beschreibung = $3, anzahl = $4 WHERE id = $5',
-      [titel, datum, beschreibung, anzahl, termin_id]
+      `UPDATE termine SET titel = $1, datum = $2, beschreibung = $3, anzahl = $4,
+         stichtag = $5, ansprechpartner_name = $6, ansprechpartner_mail = $7, score = $8 WHERE id = $9`,
+      [
+        titel,
+        datum,
+        beschreibung,
+        anzahl,
+        stichtag || null,
+        ansprechpartner_name || null,
+        ansprechpartner_mail || null,
+        typeof score !== 'undefined' ? Number(score) : 0,
+        termin_id
+      ]
     );
     res.json({ erfolg: true });
   } catch (err) {
@@ -296,12 +323,21 @@ app.post('/api/termine/:id/einschreiben', authMiddleware, async (req, res) => {
     if (teilnahmen.length >= termin.anzahl) {
       return res.status(400).json({ error: 'Keine Plätze mehr frei' });
     }
-    const userResult = await pool.query('SELECT email FROM users WHERE username = $1', [username]);
+    const userResult = await pool.query('SELECT email, score FROM users WHERE username = $1', [username]);
     const userRow = userResult.rows[0];
     if (!userRow || !userRow.email) {
       return res.status(400).json({ error: 'Keine E-Mail für diesen Nutzer hinterlegt' });
     }
     await pool.query('INSERT INTO teilnahmen (termin_id, username) VALUES ($1, $2)', [termin_id, username]);
+
+    // Score an User vergeben
+    if (typeof termin.score === "number" && termin.score > 0) {
+      await pool.query(
+        'UPDATE users SET score = COALESCE(score,0) + $1 WHERE username = $2',
+        [termin.score, username]
+      );
+    }
+
     const dateObj = new Date(termin.datum);
     const event = {
       start: [
@@ -315,7 +351,10 @@ app.post('/api/termine/:id/einschreiben', authMiddleware, async (req, res) => {
       title: termin.titel,
       description: termin.beschreibung,
       location: termin.ort || "",
-      organizer: { name: "VereinsApp", email: process.env.MAIL_FROM },
+      organizer: {
+        name: termin.ansprechpartner_name || "VereinsApp",
+        email: termin.ansprechpartner_mail || process.env.MAIL_FROM
+      }
     };
     createEvent(event, async (icsError, icsValue) => {
       if (icsError) {
@@ -330,7 +369,7 @@ app.post('/api/termine/:id/einschreiben', authMiddleware, async (req, res) => {
           attachments: [
             {
               filename: 'termin.ics',
-              content: Buffer.from(icsValue).toString('base64'), // Korrigiert: base64-Encoding
+              content: Buffer.from(icsValue).toString('base64'),
               type: 'text/calendar',
               disposition: 'attachment',
               content_id: 'terminics'
