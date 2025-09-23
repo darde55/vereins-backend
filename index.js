@@ -13,7 +13,7 @@ app.use(cors());
 app.use(express.json());
 
 // === SENDGRID ===
-sgMail.setApiKey(process.env.SENDGRID_API_KEY); // Setze hier deinen API Key als Umgebungsvariable
+sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
 // === DATABASE ===
 const pool = new Pool({
@@ -103,13 +103,13 @@ app.get('/api/termine', authenticateToken, async (req, res) => {
 
 // Termin erstellen (nur Admin)
 app.post('/api/termine', authenticateToken, requireAdmin, async (req, res) => {
-  const { titel, beschreibung, datum, beginn, ende, anzahl } = req.body;
+  const { titel, beschreibung, datum, beginn, ende, anzahl, stichtag, ansprechpartner, ansprechpartner_email, score } = req.body;
   try {
     const result = await pool.query(`
-      INSERT INTO termine (titel, beschreibung, datum, beginn, ende, anzahl)
-      VALUES ($1, $2, $3, $4, $5, $6)
+      INSERT INTO termine (titel, beschreibung, datum, beginn, ende, anzahl, stichtag, ansprechpartner, ansprechpartner_email, score)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
       RETURNING *
-    `, [titel, beschreibung, datum, beginn, ende, anzahl]);
+    `, [titel, beschreibung, datum, beginn, ende, anzahl, stichtag, ansprechpartner, ansprechpartner_email, score]);
     res.json(result.rows[0]);
   } catch (e) {
     res.status(500).json({ error: 'Fehler beim Erstellen des Termins' });
@@ -118,7 +118,7 @@ app.post('/api/termine', authenticateToken, requireAdmin, async (req, res) => {
 
 // Termin bearbeiten (nur Admin)
 app.patch('/api/termine/:id', authenticateToken, requireAdmin, async (req, res) => {
-  const { titel, beschreibung, datum, beginn, ende, anzahl } = req.body;
+  const { titel, beschreibung, datum, beginn, ende, anzahl, stichtag, ansprechpartner, ansprechpartner_email, score } = req.body;
   try {
     const result = await pool.query(`
       UPDATE termine 
@@ -127,10 +127,14 @@ app.patch('/api/termine/:id', authenticateToken, requireAdmin, async (req, res) 
           datum = COALESCE($3, datum),
           beginn = COALESCE($4, beginn),
           ende = COALESCE($5, ende),
-          anzahl = COALESCE($6, anzahl)
-      WHERE id = $7
+          anzahl = COALESCE($6, anzahl),
+          stichtag = COALESCE($7, stichtag),
+          ansprechpartner = COALESCE($8, ansprechpartner),
+          ansprechpartner_email = COALESCE($9, ansprechpartner_email),
+          score = COALESCE($10, score)
+      WHERE id = $11
       RETURNING *
-    `, [titel, beschreibung, datum, beginn, ende, anzahl, req.params.id]);
+    `, [titel, beschreibung, datum, beginn, ende, anzahl, stichtag, ansprechpartner, ansprechpartner_email, score, req.params.id]);
     res.json(result.rows[0]);
   } catch (e) {
     res.status(500).json({ error: 'Fehler beim Bearbeiten des Termins' });
@@ -174,9 +178,9 @@ function createICS({ titel, beschreibung, datum, beginn, ende }) {
   ].join("\r\n");
 }
 
-// Einschreiben
+// Einschreiben (inkl. Score-Gutschrift)
 app.post('/api/termine/:id/teilnehmer', authenticateToken, async (req, res) => {
-  const username = req.user.username;
+  const username = req.body.username || req.user.username;
   const termin_id = req.params.id;
   try {
     // Prüfen ob schon eingeschrieben
@@ -192,18 +196,25 @@ app.post('/api/termine/:id/teilnehmer', authenticateToken, async (req, res) => {
       [termin_id, username]
     );
 
+    // Score-Punkte gutschreiben
+    const terminResult = await pool.query('SELECT score FROM termine WHERE id = $1', [termin_id]);
+    const score = terminResult.rows[0]?.score || 0;
+    if (score > 0) {
+      await pool.query('UPDATE users SET score = COALESCE(score,0) + $1 WHERE username = $2', [score, username]);
+    }
+
     // Hole User-Email und Termindaten
     const userResult = await pool.query('SELECT email FROM users WHERE username = $1', [username]);
-    const terminResult = await pool.query('SELECT * FROM termine WHERE id = $1', [termin_id]);
+    const terminAllResult = await pool.query('SELECT * FROM termine WHERE id = $1', [termin_id]);
     const userEmail = userResult.rows[0]?.email;
-    const termin = terminResult.rows[0];
+    const termin = terminAllResult.rows[0];
 
     // E-Mail mit ICS-Anhang senden
     if (userEmail && termin) {
       const icsString = createICS(termin);
       const msg = {
         to: userEmail,
-        from: 'tsvdienste@web.de', // Diese Adresse MUSS bei SendGrid verifiziert sein!
+        from: 'tsvdienste@web.de',
         subject: 'Du bist eingeschrieben',
         text: `Du bist für den Termin "${termin.titel}" eingeschrieben!\nIm Anhang findest du die Kalenderdatei.`,
         attachments: [
