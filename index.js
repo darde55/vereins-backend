@@ -31,7 +31,7 @@ if (!process.env.SENDGRID_API_KEY) {
 // === DATABASE ===
 console.log("Initialisiere Datenbankpool ...");
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || "<DEINE_FALLBACK_DB_URL>",
+  connectionString: process.env.DATABASE_URL || "postgresql://postgres:pekwzYpGbWUbiXFVnPmHdwuobFuWXGHR@metro.proxy.rlwy.net:56329/railway",
   ssl: { rejectUnauthorized: false }
 });
 console.log("Postgres Pool erstellt.");
