@@ -1,5 +1,3 @@
-console.log("==== Vereinsverwaltung Backend: Starte Initialisierung ====");
-
 const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
@@ -7,58 +5,29 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const sgMail = require('@sendgrid/mail');
 
-console.log("Alle Module geladen.");
-
 const app = express();
 const port = process.env.PORT || 3001;
 
-console.log("Express App initialisiert. PORT:", port);
-
 // === MIDDLEWARE ===
 app.use(cors());
-console.log("CORS Middleware aktiviert.");
 app.use(express.json());
-console.log("express.json Middleware aktiviert.");
 
 // === SENDGRID ===
-if (!process.env.SENDGRID_API_KEY) {
-  console.error("FEHLER: SENDGRID_API_KEY nicht gesetzt!");
-} else {
-  sgMail.setApiKey(process.env.SENDGRID_API_KEY);
-  console.log("SendGrid API-Key gesetzt.");
-}
+sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
 // === DATABASE ===
-console.log("Initialisiere Datenbankpool ...");
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL || "postgresql://postgres:pekwzYpGbWUbiXFVnPmHdwuobFuWXGHR@metro.proxy.rlwy.net:56329/railway",
   ssl: { rejectUnauthorized: false }
 });
-console.log("Postgres Pool erstellt.");
-
-// Teste Datenbankverbindung sofort beim Start
-pool.connect()
-  .then(client => {
-    console.log("Verbindung zur Postgres-Datenbank erfolgreich.");
-    client.release();
-  })
-  .catch(err => {
-    console.error("FEHLER beim Verbinden zur Postgres-Datenbank:", err);
-  });
 
 // === AUTH MIDDLEWARES ===
 function authenticateToken(req, res, next) {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
-  if (!token) {
-    console.warn("[Auth] Kein Token im Header!");
-    return res.status(401).json({ error: 'Kein Token' });
-  }
+  if (!token) return res.status(401).json({ error: 'Kein Token' });
   jwt.verify(token, 'SECRET', (err, user) => {
-    if (err) {
-      console.warn("[Auth] Ungültiger Token!");
-      return res.status(403).json({ error: 'Ungültiger Token' });
-    }
+    if (err) return res.status(403).json({ error: 'Ungültiger Token' });
     req.user = user;
     next();
   });
@@ -68,34 +37,26 @@ async function requireAdmin(req, res, next) {
   try {
     const result = await pool.query('SELECT role FROM users WHERE username = $1', [req.user.username]);
     if (result.rows.length === 0 || result.rows[0].role !== 'admin') {
-      console.warn("[Admin] Keine Adminrechte für User:", req.user.username);
       return res.status(403).json({ error: 'Keine Adminrechte' });
     }
     next();
   } catch (e) {
-    console.error("[Admin] Fehler bei Admin-Prüfung:", e);
-    res.status(500).json({ error: 'Fehler bei Admin-Prüfung', detail: e.message });
+    res.status(500).json({ error: 'Fehler bei Admin-Prüfung' });
   }
 }
 
 // === AUTH ROUTE ===
 app.post('/api/login', async (req, res) => {
-  console.log("[/api/login] Aufruf erhalten für Benutzer:", req.body.username);
   const { username, password } = req.body;
-  if (!username || !password) {
-    console.warn("[/api/login] Fehlende Felder!");
-    return res.status(400).json({ error: 'Benutzername und Passwort nötig' });
-  }
+  if (!username || !password) return res.status(400).json({ error: 'Benutzername und Passwort nötig' });
   try {
     const result = await pool.query('SELECT username, password, role, score FROM users WHERE username = $1', [username]);
     if (result.rows.length === 0) {
-      console.warn("[/api/login] Benutzer nicht gefunden:", username);
       return res.status(401).json({ error: 'Benutzer nicht gefunden' });
     }
     const user = result.rows[0];
     const valid = await bcrypt.compare(password, user.password);
     if (!valid) {
-      console.warn("[/api/login] Falsches Passwort für:", username);
       return res.status(401).json({ error: 'Falsches Passwort' });
     }
     const token = jwt.sign(
@@ -103,31 +64,26 @@ app.post('/api/login', async (req, res) => {
       'SECRET',
       { expiresIn: '24h' }
     );
-    console.log("[/api/login] Login erfolgreich für:", username);
     res.json({ token, username: user.username, role: user.role, score: user.score });
   } catch (e) {
-    console.error("[/api/login] Fehler:", e);
     res.status(500).json({ error: 'Fehler beim Login', detail: e.message });
   }
 });
 
 // === USER ROUTES ===
 app.get('/api/users', authenticateToken, async (req, res) => {
-  console.log("[/api/users] GET aufgerufen von", req.user?.username);
   try {
     const result = await pool.query('SELECT username, role, score FROM users');
     res.json(result.rows);
   } catch (e) {
-    console.error("[/api/users] Fehler beim Laden der Nutzer:", e);
     res.status(500).json({ error: 'Fehler beim Laden der Nutzer' });
   }
 });
 
+// Neuen Benutzer anlegen (nur Admin)
 app.post('/api/users', authenticateToken, requireAdmin, async (req, res) => {
-  console.log("[/api/users] POST (neuer User) aufgerufen von", req.user?.username);
   const { username, email, password, role } = req.body;
   if (!username || !email || !password || !role) {
-    console.warn("[/api/users] Fehlende Felder!");
     return res.status(400).json({ error: 'Alle Felder erforderlich' });
   }
   try {
@@ -136,17 +92,14 @@ app.post('/api/users', authenticateToken, requireAdmin, async (req, res) => {
       'INSERT INTO users (username, email, password, role) VALUES ($1, $2, $3, $4) RETURNING username, email, role',
       [username, email, hash, role]
     );
-    console.log("[/api/users] Neuer User angelegt:", username);
     res.json(result.rows[0]);
   } catch (e) {
-    console.error("[/api/users] Fehler beim Anlegen des Benutzers:", e);
     res.status(500).json({ error: 'Fehler beim Anlegen des Benutzers', detail: e.message });
   }
 });
 
 // === TERMINE ROUTES ===
 app.get('/api/termine', authenticateToken, async (req, res) => {
-  console.log("[/api/termine] GET aufgerufen von", req.user?.username);
   try {
     const result = await pool.query(`
       SELECT t.*, 
@@ -162,13 +115,12 @@ app.get('/api/termine', authenticateToken, async (req, res) => {
     }));
     res.json(termine);
   } catch (e) {
-    console.error("[/api/termine] Fehler beim Laden der Termine:", e);
     res.status(500).json({ error: 'Fehler beim Laden der Termine' });
   }
 });
 
+// Termin erstellen (nur Admin)
 app.post('/api/termine', authenticateToken, requireAdmin, async (req, res) => {
-  console.log("[/api/termine] POST (neuer Termin) aufgerufen von", req.user?.username);
   const { titel, beschreibung, datum, beginn, ende, anzahl, stichtag, ansprechpartner_name, ansprechpartner_mail, score } = req.body;
   try {
     const result = await pool.query(`
@@ -176,16 +128,14 @@ app.post('/api/termine', authenticateToken, requireAdmin, async (req, res) => {
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
       RETURNING *
     `, [titel, beschreibung, datum, beginn, ende, anzahl, stichtag, ansprechpartner_name, ansprechpartner_mail, score]);
-    console.log("[/api/termine] Termin angelegt:", titel, "am", datum);
     res.json(result.rows[0]);
   } catch (e) {
-    console.error("[/api/termine] Fehler beim Erstellen des Termins:", e);
     res.status(500).json({ error: 'Fehler beim Erstellen des Termins' });
   }
 });
 
+// Termin bearbeiten (nur Admin)
 app.patch('/api/termine/:id', authenticateToken, requireAdmin, async (req, res) => {
-  console.log("[/api/termine/:id] PATCH aufgerufen von", req.user?.username, "Termin-ID:", req.params.id);
   const { titel, beschreibung, datum, beginn, ende, anzahl, stichtag, ansprechpartner_name, ansprechpartner_mail, score } = req.body;
   try {
     const result = await pool.query(`
@@ -203,22 +153,18 @@ app.patch('/api/termine/:id', authenticateToken, requireAdmin, async (req, res) 
       WHERE id = $11
       RETURNING *
     `, [titel, beschreibung, datum, beginn, ende, anzahl, stichtag, ansprechpartner_name, ansprechpartner_mail, score, req.params.id]);
-    console.log("[/api/termine/:id] Termin bearbeitet:", req.params.id);
     res.json(result.rows[0]);
   } catch (e) {
-    console.error("[/api/termine/:id] Fehler beim Bearbeiten des Termins:", e);
     res.status(500).json({ error: 'Fehler beim Bearbeiten des Termins' });
   }
 });
 
+// Termin löschen (nur Admin)
 app.delete('/api/termine/:id', authenticateToken, requireAdmin, async (req, res) => {
-  console.log("[/api/termine/:id] DELETE aufgerufen von", req.user?.username, "Termin-ID:", req.params.id);
   try {
     await pool.query('DELETE FROM termine WHERE id = $1', [req.params.id]);
-    console.log("[/api/termine/:id] Termin gelöscht:", req.params.id);
     res.json({ success: true });
   } catch (e) {
-    console.error("[/api/termine/:id] Fehler beim Löschen des Termins:", e);
     res.status(500).json({ error: 'Fehler beim Löschen des Termins' });
   }
 });
@@ -248,32 +194,38 @@ function createICS({ titel, beschreibung, datum, beginn, ende }) {
   ].join("\r\n");
 }
 
+// Einschreiben (inkl. Score-Gutschrift)
 app.post('/api/termine/:id/teilnehmer', authenticateToken, async (req, res) => {
-  console.log("[/api/termine/:id/teilnehmer] POST aufgerufen von", req.user?.username, "Termin-ID:", req.params.id);
   const username = req.body.username || req.user.username;
   const termin_id = req.params.id;
   try {
+    // Prüfen ob schon eingeschrieben
     const check = await pool.query(
       'SELECT * FROM teilnahmen WHERE termin_id = $1 AND username = $2',
       [termin_id, username]
     );
     if (check.rows.length !== 0) {
-      console.warn("[/api/termine/:id/teilnehmer] User ist schon eingeschrieben:", username);
       return res.status(409).json({ error: 'Bereits eingeschrieben!' });
     }
     await pool.query(
       'INSERT INTO teilnahmen (termin_id, username) VALUES ($1, $2)',
       [termin_id, username]
     );
+
+    // Score-Punkte gutschreiben
     const terminResult = await pool.query('SELECT score FROM termine WHERE id = $1', [termin_id]);
     const score = terminResult.rows[0]?.score || 0;
     if (score > 0) {
       await pool.query('UPDATE users SET score = COALESCE(score,0) + $1 WHERE username = $2', [score, username]);
     }
+
+    // Hole User-Email und Termindaten
     const userResult = await pool.query('SELECT email FROM users WHERE username = $1', [username]);
     const terminAllResult = await pool.query('SELECT * FROM termine WHERE id = $1', [termin_id]);
     const userEmail = userResult.rows[0]?.email;
     const termin = terminAllResult.rows[0];
+
+    // E-Mail mit ICS-Anhang senden
     if (userEmail && termin) {
       const icsString = createICS(termin);
       const msg = {
@@ -292,20 +244,19 @@ app.post('/api/termine/:id/teilnehmer', authenticateToken, async (req, res) => {
       };
       try {
         await sgMail.send(msg);
-        console.log("[/api/termine/:id/teilnehmer] Einschreibe-Mail an", userEmail, "gesendet.");
       } catch (err) {
-        console.error("[/api/termine/:id/teilnehmer] SendGrid-Fehler:", err.response ? err.response.body : err);
+        console.error("SendGrid-Fehler:", err.response ? err.response.body : err);
       }
     }
+
     res.json({ success: true });
   } catch (e) {
-    console.error("[/api/termine/:id/teilnehmer] Fehler:", e);
     res.status(500).json({ error: 'Fehler beim Einschreiben' });
   }
 });
 
+// Austragen
 app.delete('/api/termine/:id/teilnehmer', authenticateToken, async (req, res) => {
-  console.log("[/api/termine/:id/teilnehmer] DELETE aufgerufen von", req.user?.username, "Termin-ID:", req.params.id);
   const username = req.user.username;
   const termin_id = req.params.id;
   try {
@@ -315,33 +266,36 @@ app.delete('/api/termine/:id/teilnehmer', authenticateToken, async (req, res) =>
     );
     res.json({ success: true });
   } catch (e) {
-    console.error("[/api/termine/:id/teilnehmer] Fehler beim Austragen:", e);
     res.status(500).json({ error: 'Fehler beim Austragen' });
   }
 });
 
 // === STICHTAGMAIL-ROUTE ===
 app.post('/api/send-stichtag-mails', async (req, res) => {
-  console.log("[/api/send-stichtag-mails] Route aufgerufen.");
   try {
+    console.log("==== Stichtagsmail-Route aufgerufen ====");
     const today = new Date().toISOString().slice(0, 10);
+    console.log("Heute ist:", today);
+
     const result = await pool.query(`
       SELECT * FROM termine
       WHERE stichtag = $1 AND (stichtag_mail_gesendet IS NULL OR stichtag_mail_gesendet = false)
         AND ansprechpartner_mail IS NOT NULL AND ansprechpartner_mail != ''
     `, [today]);
     const termine = result.rows;
-    console.log("[/api/send-stichtag-mails] Gefundene Termine für heute:", termine.length);
+    console.log("Gefundene Termine für heute:", termine.length);
 
     let mailsSent = 0;
     for (const termin of termine) {
       try {
+        // Eingeschriebene User holen
         const teilnehmerRes = await pool.query(
           'SELECT username FROM teilnahmen WHERE termin_id = $1',
           [termin.id]
         );
         const teilnehmer = teilnehmerRes.rows.map(row => row.username);
 
+        // Mailtext inkl. Teilnehmerliste
         const mailText = `
 Hallo ${termin.ansprechpartner_name || ""},
 
@@ -360,7 +314,7 @@ Viele Grüße
 Dein Vereinsverwaltungssystem
         `.trim();
 
-        console.log("[/api/send-stichtag-mails] Versuche Mail zu senden an", termin.ansprechpartner_mail, "Termin-ID:", termin.id);
+        console.log(`--- Versuche Mail zu senden an ${termin.ansprechpartner_mail}, Termin-ID: ${termin.id} ---`);
         if (!process.env.SENDGRID_API_KEY) {
           console.error('SENDGRID_API_KEY NICHT gesetzt!');
           continue;
@@ -371,32 +325,32 @@ Dein Vereinsverwaltungssystem
           subject: `Stichtag für Termin: ${termin.titel}`,
           text: mailText
         });
-        console.log("[/api/send-stichtag-mails] Stichtagsmail erfolgreich an", termin.ansprechpartner_mail, "versendet (Termin:", termin.titel, "ID:", termin.id, ")");
+        console.log('Mail erfolgreich gesendet an', termin.ansprechpartner_mail);
+
         const updateResult = await pool.query(
           'UPDATE termine SET stichtag_mail_gesendet = true WHERE id = $1',
           [termin.id]
         );
-        console.log("[/api/send-stichtag-mails] DB-UPDATE:", updateResult.rowCount, "Zeile(n) aktualisiert für Termin-ID:", termin.id);
+        console.log('DB-UPDATE:', updateResult.rowCount, 'Zeile(n) aktualisiert für Termin-ID:', termin.id);
         mailsSent++;
       } catch (mailErr) {
-        console.error("[/api/send-stichtag-mails] Fehler beim Mailversand an", termin.ansprechpartner_mail, ":", mailErr);
+        console.error(`Fehler beim Mailversand an ${termin.ansprechpartner_mail}:`, mailErr);
       }
     }
-    console.log("[/api/send-stichtag-mails] Fertig. Gesendete Mails:", mailsSent);
+    console.log('==== Fertig. Gesendete Mails:', mailsSent, '====');
     res.json({ success: true, mailsSent });
   } catch (err) {
-    console.error("[/api/send-stichtag-mails] Fehler beim Stichtagsmail-Versand:", err);
+    console.error('Fehler beim Stichtagsmail-Versand:', err);
     res.status(500).json({ error: 'Fehler beim Senden der Stichtagsmails' });
   }
 });
 
 // === DEFAULT ROUTE ===
 app.get('/', (req, res) => {
-  console.log("[/] GET Root-Route wurde aufgerufen.");
   res.send('Vereinsverwaltung Backend läuft!');
 });
 
 // === SERVER START ===
 app.listen(port, () => {
-  console.log(`==== Vereinsverwaltung Backend läuft auf Port ${port} ====`);
+  console.log(`Server läuft auf Port ${port}`);
 });
