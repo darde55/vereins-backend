@@ -271,7 +271,7 @@ app.delete('/api/termine/:id/teilnehmer', authenticateToken, async (req, res) =>
   }
 });
 
-// === STICHTAGMAIL-ROUTE ===
+// === STICHTAGMAIL-ROUTE: Automatische Auffüllung + User- & Ansprechpartner-Benachrichtigung ===
 app.post('/api/send-stichtag-mails', async (req, res) => {
   try {
     console.log("==== Stichtagsmail-Route aufgerufen ====");
@@ -281,22 +281,100 @@ app.post('/api/send-stichtag-mails', async (req, res) => {
     const result = await pool.query(`
       SELECT * FROM termine
       WHERE stichtag = $1 AND (stichtag_mail_gesendet IS NULL OR stichtag_mail_gesendet = false)
-        AND ansprechpartner_mail IS NOT NULL AND ansprechpartner_mail != ''
     `, [today]);
     const termine = result.rows;
     console.log("Gefundene Termine für heute:", termine.length);
 
     let mailsSent = 0;
+    let autoZuteilungen = 0;
+
     for (const termin of termine) {
-      try {
-        // Eingeschriebene User holen
-        const teilnehmerRes = await pool.query(
+      // Aktuelle Teilnehmer holen
+      const teilnehmerRes = await pool.query(
+        'SELECT username FROM teilnahmen WHERE termin_id = $1',
+        [termin.id]
+      );
+      const teilnehmer = teilnehmerRes.rows.map(row => row.username);
+
+      // Offene Plätze berechnen
+      const freiePlaetze = Math.max(0, termin.anzahl - teilnehmer.length);
+      if (freiePlaetze > 0) {
+        // Alle User holen, die noch NICHT zugeordnet sind
+        const freieUserRes = await pool.query(
+          `SELECT * FROM users 
+           WHERE username NOT IN (
+              SELECT username FROM teilnahmen WHERE termin_id = $1
+           )`,
+          [termin.id]
+        );
+        const freieUser = freieUserRes.rows;
+        if (freieUser.length > 0) {
+          // Niedrigster Score bestimmen
+          const minScore = Math.min(...freieUser.map(u => u.score || 0));
+          // Nur User mit minimalem Score nehmen
+          const kandidaten = freieUser.filter(u => (u.score || 0) === minScore);
+
+          // Kandidaten zufällig mischen
+          for (let i = kandidaten.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [kandidaten[i], kandidaten[j]] = [kandidaten[j], kandidaten[i]];
+          }
+
+          // Anzahl, die zugeteilt werden soll (nicht mehr als offene Plätze)
+          const zuVergeben = Math.min(freiePlaetze, kandidaten.length);
+          const ausgewählte = kandidaten.slice(0, zuVergeben);
+
+          for (const user of ausgewählte) {
+            // Zuteilung in teilnahmen-Tabelle eintragen
+            await pool.query(
+              'INSERT INTO teilnahmen (termin_id, username) VALUES ($1, $2)',
+              [termin.id, user.username]
+            );
+
+            // Score gutschreiben, falls im Termin hinterlegt
+            const score = termin.score || 0;
+            if (score > 0) {
+              await pool.query('UPDATE users SET score = COALESCE(score,0) + $1 WHERE username = $2', [score, user.username]);
+            }
+
+            // Benachrichtigungsmail an User senden
+            if (user.email) {
+              const icsString = createICS(termin);
+              const msg = {
+                to: user.email,
+                from: 'tsvdienste@web.de',
+                subject: 'Du wurdest automatisch für einen Termin eingeteilt!',
+                text: `Du wurdest für den Termin "${termin.titel}" automatisch eingeteilt, weil noch Plätze frei waren.\nIm Anhang findest du die Kalenderdatei.`,
+                attachments: [
+                  {
+                    content: Buffer.from(icsString).toString('base64'),
+                    filename: "termin.ics",
+                    type: "text/calendar",
+                    disposition: "attachment"
+                  }
+                ]
+              };
+              try {
+                await sgMail.send(msg);
+                console.log(`Auto-Zuteilungs-Mail an ${user.email} für Termin '${termin.titel}' (ID: ${termin.id}) versendet.`);
+                autoZuteilungen++;
+              } catch (err) {
+                console.error("SendGrid-Fehler beim Auto-Zuteilen:", err.response ? err.response.body : err);
+              }
+            }
+          }
+        }
+      }
+
+      // Ansprechpartner informieren (immer, auch wenn keine Zuteilung)
+      if (termin.ansprechpartner_mail) {
+        // Teilnehmer nach Zuteilung holen
+        const neueTeilnehmerRes = await pool.query(
           'SELECT username FROM teilnahmen WHERE termin_id = $1',
           [termin.id]
         );
-        const teilnehmer = teilnehmerRes.rows.map(row => row.username);
+        const neueTeilnehmer = neueTeilnehmerRes.rows.map(row => row.username);
 
-        // Mailtext inkl. Teilnehmerliste
         const mailText = `
 Hallo ${termin.ansprechpartner_name || ""},
 
@@ -307,42 +385,40 @@ Beginn: ${termin.beginn || "-"}
 Ende: ${termin.ende || "-"}
 Beschreibung: ${termin.beschreibung || "-"}
 
-Eingeschriebene Teilnehmer: ${teilnehmer.length > 0 ? teilnehmer.join(', ') : 'Noch keine'}
+Eingeschriebene Teilnehmer: ${neueTeilnehmer.length > 0 ? neueTeilnehmer.join(', ') : 'Noch keine'}
 
-Bitte denke an die Organisation!
+Offene Plätze wurden (falls nötig) automatisch aufgefüllt.
 
 Viele Grüße
 Dein Vereinsverwaltungssystem
         `.trim();
 
-        console.log(`--- Versuche Mail zu senden an ${termin.ansprechpartner_mail}, Termin-ID: ${termin.id} ---`);
-        if (!process.env.SENDGRID_API_KEY) {
-          console.error('SENDGRID_API_KEY NICHT gesetzt!');
-          continue;
+        try {
+          await sgMail.send({
+            to: termin.ansprechpartner_mail,
+            from: 'tsvdienste@web.de',
+            subject: `Stichtag für Termin: ${termin.titel}`,
+            text: mailText
+          });
+          console.log(`Stichtagsmail erfolgreich an ${termin.ansprechpartner_mail} versendet (Termin: "${termin.titel}", ID: ${termin.id})`);
+          mailsSent++;
+        } catch (mailErr) {
+          console.error(`Fehler beim Mailversand an ${termin.ansprechpartner_mail}:`, mailErr);
         }
-        await sgMail.send({
-          to: termin.ansprechpartner_mail,
-          from: 'tsvdienste@web.de',
-          subject: `Stichtag für Termin: ${termin.titel}`,
-          text: mailText
-        });
-        console.log(`Stichtagsmail erfolgreich an ${termin.ansprechpartner_mail} versendet (Termin: "${termin.titel}", ID: ${termin.id})`);
-
-        const updateResult = await pool.query(
-          'UPDATE termine SET stichtag_mail_gesendet = true WHERE id = $1',
-          [termin.id]
-        );
-        console.log('DB-UPDATE:', updateResult.rowCount, 'Zeile(n) aktualisiert für Termin-ID:', termin.id);
-        mailsSent++;
-      } catch (mailErr) {
-        console.error(`Fehler beim Mailversand an ${termin.ansprechpartner_mail}:`, mailErr);
       }
+
+      // Termin als "Mail gesendet" markieren
+      await pool.query(
+        'UPDATE termine SET stichtag_mail_gesendet = true WHERE id = $1',
+        [termin.id]
+      );
     }
-    console.log('==== Fertig. Gesendete Mails:', mailsSent, '====');
-    res.json({ success: true, mailsSent });
+
+    console.log('==== Fertig. Gesendete Mails:', mailsSent, '| Auto-Zuteilungen:', autoZuteilungen, '====');
+    res.json({ success: true, mailsSent, autoZuteilungen });
   } catch (err) {
-    console.error('Fehler beim Stichtagsmail-Versand:', err);
-    res.status(500).json({ error: 'Fehler beim Senden der Stichtagsmails' });
+    console.error('Fehler beim Stichtags-Prozess:', err);
+    res.status(500).json({ error: 'Fehler beim Senden der Stichtagsmails/Autozuteilung' });
   }
 });
 
