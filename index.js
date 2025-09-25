@@ -8,26 +8,58 @@ const sgMail = require('@sendgrid/mail');
 const app = express();
 const port = process.env.PORT || 3001;
 
+// === UNHANDLED ERROR LOGGING ===
+process.on('unhandledRejection', err => {
+  console.error('[UNHANDLED REJECTION]', err);
+});
+process.on('uncaughtException', err => {
+  console.error('[UNCAUGHT EXCEPTION]', err);
+});
+
 // === MIDDLEWARE ===
 app.use(cors());
 app.use(express.json());
 
 // === SENDGRID ===
-sgMail.setApiKey(process.env.SENDGRID_API_KEY);
+try {
+  if (!process.env.SENDGRID_API_KEY) {
+    throw new Error('SENDGRID_API_KEY nicht gesetzt!');
+  }
+  sgMail.setApiKey(process.env.SENDGRID_API_KEY);
+  console.log("SendGrid-ApiKey geladen.");
+} catch (err) {
+  console.error("[SendGrid]", err);
+}
 
 // === DATABASE ===
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || "postgresql://postgres:pekwzYpGbWUbiXFVnPmHdwuobFuWXGHR@metro.proxy.rlwy.net:56329/railway",
-  ssl: { rejectUnauthorized: false }
-});
+let pool;
+try {
+  if (!process.env.DATABASE_URL) {
+    throw new Error('DATABASE_URL nicht gesetzt!');
+  }
+  pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: { rejectUnauthorized: false }
+  });
+  console.log("Postgres-DB Pool initialisiert.");
+} catch (err) {
+  console.error("[DB]", err);
+  process.exit(1);
+}
 
 // === AUTH MIDDLEWARES ===
 function authenticateToken(req, res, next) {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
-  if (!token) return res.status(401).json({ error: 'Kein Token' });
+  if (!token) {
+    console.warn("[Auth] Kein Token im Header!");
+    return res.status(401).json({ error: 'Kein Token' });
+  }
   jwt.verify(token, 'SECRET', (err, user) => {
-    if (err) return res.status(403).json({ error: 'Ungültiger Token' });
+    if (err) {
+      console.warn("[Auth] Ungültiger Token!");
+      return res.status(403).json({ error: 'Ungültiger Token' });
+    }
     req.user = user;
     next();
   });
@@ -37,26 +69,33 @@ async function requireAdmin(req, res, next) {
   try {
     const result = await pool.query('SELECT role FROM users WHERE username = $1', [req.user.username]);
     if (result.rows.length === 0 || result.rows[0].role !== 'admin') {
+      console.warn("[Admin] Keine Adminrechte für User:", req.user.username);
       return res.status(403).json({ error: 'Keine Adminrechte' });
     }
     next();
   } catch (e) {
-    res.status(500).json({ error: 'Fehler bei Admin-Prüfung' });
+    console.error("[Admin] Fehler bei Admin-Prüfung:", e);
+    res.status(500).json({ error: 'Fehler bei Admin-Prüfung', detail: e.message });
   }
 }
 
 // === AUTH ROUTE ===
 app.post('/api/login', async (req, res) => {
   const { username, password } = req.body;
-  if (!username || !password) return res.status(400).json({ error: 'Benutzername und Passwort nötig' });
+  if (!username || !password) {
+    console.warn("[Login] Fehlende Felder!");
+    return res.status(400).json({ error: 'Benutzername und Passwort nötig' });
+  }
   try {
     const result = await pool.query('SELECT username, password, role, score FROM users WHERE username = $1', [username]);
     if (result.rows.length === 0) {
+      console.warn("[Login] Benutzer nicht gefunden:", username);
       return res.status(401).json({ error: 'Benutzer nicht gefunden' });
     }
     const user = result.rows[0];
     const valid = await bcrypt.compare(password, user.password);
     if (!valid) {
+      console.warn("[Login] Falsches Passwort für:", username);
       return res.status(401).json({ error: 'Falsches Passwort' });
     }
     const token = jwt.sign(
@@ -66,6 +105,7 @@ app.post('/api/login', async (req, res) => {
     );
     res.json({ token, username: user.username, role: user.role, score: user.score });
   } catch (e) {
+    console.error("[Login] Fehler:", e);
     res.status(500).json({ error: 'Fehler beim Login', detail: e.message });
   }
 });
@@ -76,14 +116,15 @@ app.get('/api/users', authenticateToken, async (req, res) => {
     const result = await pool.query('SELECT username, role, score FROM users');
     res.json(result.rows);
   } catch (e) {
-    res.status(500).json({ error: 'Fehler beim Laden der Nutzer' });
+    console.error("[Users] Fehler beim Laden der Nutzer:", e);
+    res.status(500).json({ error: 'Fehler beim Laden der Nutzer', detail: e.message });
   }
 });
 
-// Neuen Benutzer anlegen (nur Admin)
 app.post('/api/users', authenticateToken, requireAdmin, async (req, res) => {
   const { username, email, password, role } = req.body;
   if (!username || !email || !password || !role) {
+    console.warn("[UserAdd] Fehlende Felder!");
     return res.status(400).json({ error: 'Alle Felder erforderlich' });
   }
   try {
@@ -94,6 +135,7 @@ app.post('/api/users', authenticateToken, requireAdmin, async (req, res) => {
     );
     res.json(result.rows[0]);
   } catch (e) {
+    console.error("[UserAdd] Fehler:", e);
     res.status(500).json({ error: 'Fehler beim Anlegen des Benutzers', detail: e.message });
   }
 });
@@ -115,11 +157,11 @@ app.get('/api/termine', authenticateToken, async (req, res) => {
     }));
     res.json(termine);
   } catch (e) {
-    res.status(500).json({ error: 'Fehler beim Laden der Termine' });
+    console.error("[Termine] Fehler beim Laden der Termine:", e);
+    res.status(500).json({ error: 'Fehler beim Laden der Termine', detail: e.message });
   }
 });
 
-// Termin erstellen (nur Admin)
 app.post('/api/termine', authenticateToken, requireAdmin, async (req, res) => {
   const { titel, beschreibung, datum, beginn, ende, anzahl, stichtag, ansprechpartner_name, ansprechpartner_mail, score } = req.body;
   try {
@@ -130,11 +172,11 @@ app.post('/api/termine', authenticateToken, requireAdmin, async (req, res) => {
     `, [titel, beschreibung, datum, beginn, ende, anzahl, stichtag, ansprechpartner_name, ansprechpartner_mail, score]);
     res.json(result.rows[0]);
   } catch (e) {
-    res.status(500).json({ error: 'Fehler beim Erstellen des Termins' });
+    console.error("[TermineAdd] Fehler beim Erstellen des Termins:", e);
+    res.status(500).json({ error: 'Fehler beim Erstellen des Termins', detail: e.message });
   }
 });
 
-// Termin bearbeiten (nur Admin)
 app.patch('/api/termine/:id', authenticateToken, requireAdmin, async (req, res) => {
   const { titel, beschreibung, datum, beginn, ende, anzahl, stichtag, ansprechpartner_name, ansprechpartner_mail, score } = req.body;
   try {
@@ -155,17 +197,18 @@ app.patch('/api/termine/:id', authenticateToken, requireAdmin, async (req, res) 
     `, [titel, beschreibung, datum, beginn, ende, anzahl, stichtag, ansprechpartner_name, ansprechpartner_mail, score, req.params.id]);
     res.json(result.rows[0]);
   } catch (e) {
-    res.status(500).json({ error: 'Fehler beim Bearbeiten des Termins' });
+    console.error("[TermineEdit] Fehler beim Bearbeiten des Termins:", e);
+    res.status(500).json({ error: 'Fehler beim Bearbeiten des Termins', detail: e.message });
   }
 });
 
-// Termin löschen (nur Admin)
 app.delete('/api/termine/:id', authenticateToken, requireAdmin, async (req, res) => {
   try {
     await pool.query('DELETE FROM termine WHERE id = $1', [req.params.id]);
     res.json({ success: true });
   } catch (e) {
-    res.status(500).json({ error: 'Fehler beim Löschen des Termins' });
+    console.error("[TermineDel] Fehler beim Löschen des Termins:", e);
+    res.status(500).json({ error: 'Fehler beim Löschen des Termins', detail: e.message });
   }
 });
 
@@ -194,17 +237,16 @@ function createICS({ titel, beschreibung, datum, beginn, ende }) {
   ].join("\r\n");
 }
 
-// Einschreiben (inkl. Score-Gutschrift)
 app.post('/api/termine/:id/teilnehmer', authenticateToken, async (req, res) => {
   const username = req.body.username || req.user.username;
   const termin_id = req.params.id;
   try {
-    // Prüfen ob schon eingeschrieben
     const check = await pool.query(
       'SELECT * FROM teilnahmen WHERE termin_id = $1 AND username = $2',
       [termin_id, username]
     );
     if (check.rows.length !== 0) {
+      console.warn("[Einschreiben] Bereits eingeschrieben:", username, "bei Termin", termin_id);
       return res.status(409).json({ error: 'Bereits eingeschrieben!' });
     }
     await pool.query(
@@ -212,20 +254,17 @@ app.post('/api/termine/:id/teilnehmer', authenticateToken, async (req, res) => {
       [termin_id, username]
     );
 
-    // Score-Punkte gutschreiben
     const terminResult = await pool.query('SELECT score FROM termine WHERE id = $1', [termin_id]);
     const score = terminResult.rows[0]?.score || 0;
     if (score > 0) {
       await pool.query('UPDATE users SET score = COALESCE(score,0) + $1 WHERE username = $2', [score, username]);
     }
 
-    // Hole User-Email und Termindaten
     const userResult = await pool.query('SELECT email FROM users WHERE username = $1', [username]);
     const terminAllResult = await pool.query('SELECT * FROM termine WHERE id = $1', [termin_id]);
     const userEmail = userResult.rows[0]?.email;
     const termin = terminAllResult.rows[0];
 
-    // E-Mail mit ICS-Anhang senden
     if (userEmail && termin) {
       const icsString = createICS(termin);
       const msg = {
@@ -244,19 +283,19 @@ app.post('/api/termine/:id/teilnehmer', authenticateToken, async (req, res) => {
       };
       try {
         await sgMail.send(msg);
-        console.log(`Einschreibe-Mail an ${userEmail} für Termin '${termin.titel}' (ID: ${termin.id}) versendet.`);
+        console.log(`[Einschreiben] Mail an ${userEmail} für Termin '${termin.titel}' gesendet.`);
       } catch (err) {
-        console.error("SendGrid-Fehler beim Einschreiben:", err.response ? err.response.body : err);
+        console.error("[Einschreiben] SendGrid-Fehler:", err.response ? err.response.body : err);
       }
     }
 
     res.json({ success: true });
   } catch (e) {
-    res.status(500).json({ error: 'Fehler beim Einschreiben' });
+    console.error("[Einschreiben] Fehler:", e);
+    res.status(500).json({ error: 'Fehler beim Einschreiben', detail: e.message });
   }
 });
 
-// Austragen
 app.delete('/api/termine/:id/teilnehmer', authenticateToken, async (req, res) => {
   const username = req.user.username;
   const termin_id = req.params.id;
@@ -267,39 +306,41 @@ app.delete('/api/termine/:id/teilnehmer', authenticateToken, async (req, res) =>
     );
     res.json({ success: true });
   } catch (e) {
-    res.status(500).json({ error: 'Fehler beim Austragen' });
+    console.error("[Austragen] Fehler:", e);
+    res.status(500).json({ error: 'Fehler beim Austragen', detail: e.message });
   }
 });
 
 // === STICHTAGMAIL-ROUTE: Automatische Auffüllung + User- & Ansprechpartner-Benachrichtigung ===
 app.post('/api/send-stichtag-mails', async (req, res) => {
   try {
-    console.log("==== Stichtagsmail-Route aufgerufen ====");
+    console.log("[Stichtag] Route aufgerufen");
     const today = new Date().toISOString().slice(0, 10);
-    console.log("Heute ist:", today);
+    console.log("[Stichtag] Heute ist:", today);
 
     const result = await pool.query(`
       SELECT * FROM termine
       WHERE stichtag = $1 AND (stichtag_mail_gesendet IS NULL OR stichtag_mail_gesendet = false)
     `, [today]);
     const termine = result.rows;
-    console.log("Gefundene Termine für heute:", termine.length);
+    console.log("[Stichtag] Gefundene Termine für heute:", termine.length);
 
     let mailsSent = 0;
     let autoZuteilungen = 0;
 
     for (const termin of termine) {
-      // Aktuelle Teilnehmer holen
+      console.log("[Stichtag] Prüfe Termin:", termin.id, termin.titel);
+
       const teilnehmerRes = await pool.query(
         'SELECT username FROM teilnahmen WHERE termin_id = $1',
         [termin.id]
       );
       const teilnehmer = teilnehmerRes.rows.map(row => row.username);
 
-      // Offene Plätze berechnen
       const freiePlaetze = Math.max(0, termin.anzahl - teilnehmer.length);
+      console.log(`[Stichtag] Termin ${termin.id}: Offene Plätze: ${freiePlaetze}`);
+
       if (freiePlaetze > 0) {
-        // Alle User holen, die noch NICHT zugeordnet sind
         const freieUserRes = await pool.query(
           `SELECT * FROM users 
            WHERE username NOT IN (
@@ -308,74 +349,73 @@ app.post('/api/send-stichtag-mails', async (req, res) => {
           [termin.id]
         );
         const freieUser = freieUserRes.rows;
-        if (freieUser.length > 0) {
-          // Niedrigster Score bestimmen
-          const minScore = Math.min(...freieUser.map(u => u.score || 0));
-          // Nur User mit minimalem Score nehmen
-          const kandidaten = freieUser.filter(u => (u.score || 0) === minScore);
+        console.log(`[Stichtag] Termin ${termin.id}: Freie User: ${freieUser.length}`);
 
-          // Kandidaten zufällig mischen
+        if (freieUser.length > 0) {
+          const minScore = Math.min(...freieUser.map(u => u.score || 0));
+          const kandidaten = freieUser.filter(u => (u.score || 0) === minScore);
+          console.log(`[Stichtag] Termin ${termin.id}: Kandidaten mit minScore ${minScore}: ${kandidaten.map(u => u.username).join(', ')}`);
+
+          // Shuffle
           for (let i = kandidaten.length - 1; i > 0; i--) {
             const j = Math.floor(Math.random() * (i + 1));
             [kandidaten[i], kandidaten[j]] = [kandidaten[j], kandidaten[i]];
           }
 
-          // Anzahl, die zugeteilt werden soll (nicht mehr als offene Plätze)
           const zuVergeben = Math.min(freiePlaetze, kandidaten.length);
-          const ausgewählte = kandidaten.slice(0, zuVergeben);
+          const ausgewaehlt = kandidaten.slice(0, zuVergeben);
 
-          for (const user of ausgewählte) {
-            // Zuteilung in teilnahmen-Tabelle eintragen
-            await pool.query(
-              'INSERT INTO teilnahmen (termin_id, username) VALUES ($1, $2)',
-              [termin.id, user.username]
-            );
-
-            // Score gutschreiben, falls im Termin hinterlegt
-            const score = termin.score || 0;
-            if (score > 0) {
-              await pool.query('UPDATE users SET score = COALESCE(score,0) + $1 WHERE username = $2', [score, user.username]);
-            }
-
-            // Benachrichtigungsmail an User senden
-            if (user.email) {
-              const icsString = createICS(termin);
-              const msg = {
-                to: user.email,
-                from: 'tsvdienste@web.de',
-                subject: 'Du wurdest automatisch für einen Termin eingeteilt!',
-                text: `Du wurdest für den Termin "${termin.titel}" automatisch eingeteilt, weil noch Plätze frei waren.\nIm Anhang findest du die Kalenderdatei.`,
-                attachments: [
-                  {
-                    content: Buffer.from(icsString).toString('base64'),
-                    filename: "termin.ics",
-                    type: "text/calendar",
-                    disposition: "attachment"
-                  }
-                ]
-              };
-              try {
-                await sgMail.send(msg);
-                console.log(`Auto-Zuteilungs-Mail an ${user.email} für Termin '${termin.titel}' (ID: ${termin.id}) versendet.`);
-                autoZuteilungen++;
-              } catch (err) {
-                console.error("SendGrid-Fehler beim Auto-Zuteilen:", err.response ? err.response.body : err);
+          for (const user of ausgewaehlt) {
+            try {
+              await pool.query(
+                'INSERT INTO teilnahmen (termin_id, username) VALUES ($1, $2)',
+                [termin.id, user.username]
+              );
+              const score = termin.score || 0;
+              if (score > 0) {
+                await pool.query('UPDATE users SET score = COALESCE(score,0) + $1 WHERE username = $2', [score, user.username]);
               }
+              if (user.email) {
+                const icsString = createICS(termin);
+                const msg = {
+                  to: user.email,
+                  from: 'tsvdienste@web.de',
+                  subject: 'Du wurdest automatisch für einen Termin eingeteilt!',
+                  text: `Du wurdest für den Termin "${termin.titel}" automatisch eingeteilt, weil noch Plätze frei waren.\nIm Anhang findest du die Kalenderdatei.`,
+                  attachments: [
+                    {
+                      content: Buffer.from(icsString).toString('base64'),
+                      filename: "termin.ics",
+                      type: "text/calendar",
+                      disposition: "attachment"
+                    }
+                  ]
+                };
+                try {
+                  await sgMail.send(msg);
+                  console.log(`[Stichtag] Auto-Mail an ${user.email} für Termin '${termin.titel}' gesendet.`);
+                  autoZuteilungen++;
+                } catch (err) {
+                  console.error("[Stichtag] SendGrid-Fehler bei Auto-Mail:", err.response ? err.response.body : err);
+                }
+              }
+            } catch (err) {
+              console.error(`[Stichtag] Fehler beim Zuteilen/Benachrichtigen User ${user.username}:`, err);
             }
           }
         }
       }
 
-      // Ansprechpartner informieren (immer, auch wenn keine Zuteilung)
+      // Ansprechpartner immer benachrichtigen
       if (termin.ansprechpartner_mail) {
-        // Teilnehmer nach Zuteilung holen
-        const neueTeilnehmerRes = await pool.query(
-          'SELECT username FROM teilnahmen WHERE termin_id = $1',
-          [termin.id]
-        );
-        const neueTeilnehmer = neueTeilnehmerRes.rows.map(row => row.username);
+        try {
+          const neueTeilnehmerRes = await pool.query(
+            'SELECT username FROM teilnahmen WHERE termin_id = $1',
+            [termin.id]
+          );
+          const neueTeilnehmer = neueTeilnehmerRes.rows.map(row => row.username);
 
-        const mailText = `
+          const mailText = `
 Hallo ${termin.ansprechpartner_name || ""},
 
 dies ist eine automatische Erinnerung zum Stichtag für den Termin:
@@ -391,34 +431,37 @@ Offene Plätze wurden (falls nötig) automatisch aufgefüllt.
 
 Viele Grüße
 Dein Vereinsverwaltungssystem
-        `.trim();
+          `.trim();
 
-        try {
           await sgMail.send({
             to: termin.ansprechpartner_mail,
             from: 'tsvdienste@web.de',
             subject: `Stichtag für Termin: ${termin.titel}`,
             text: mailText
           });
-          console.log(`Stichtagsmail erfolgreich an ${termin.ansprechpartner_mail} versendet (Termin: "${termin.titel}", ID: ${termin.id})`);
+          console.log(`[Stichtag] Ansprechpartner-Mail an ${termin.ansprechpartner_mail} für Termin ${termin.id} gesendet.`);
           mailsSent++;
         } catch (mailErr) {
-          console.error(`Fehler beim Mailversand an ${termin.ansprechpartner_mail}:`, mailErr);
+          console.error(`[Stichtag] Fehler beim Senden Ansprechpartner-Mail:`, mailErr);
         }
       }
 
-      // Termin als "Mail gesendet" markieren
-      await pool.query(
-        'UPDATE termine SET stichtag_mail_gesendet = true WHERE id = $1',
-        [termin.id]
-      );
+      try {
+        await pool.query(
+          'UPDATE termine SET stichtag_mail_gesendet = true WHERE id = $1',
+          [termin.id]
+        );
+        console.log(`[Stichtag] Termin ${termin.id} als "Mail gesendet" markiert.`);
+      } catch (updateErr) {
+        console.error(`[Stichtag] Fehler beim Update von stichtag_mail_gesendet für Termin ${termin.id}:`, updateErr);
+      }
     }
 
-    console.log('==== Fertig. Gesendete Mails:', mailsSent, '| Auto-Zuteilungen:', autoZuteilungen, '====');
+    console.log('[Stichtag] Fertig. Ansprechpartner-Mails:', mailsSent, '| Auto-Zuteilungen:', autoZuteilungen);
     res.json({ success: true, mailsSent, autoZuteilungen });
   } catch (err) {
-    console.error('Fehler beim Stichtags-Prozess:', err);
-    res.status(500).json({ error: 'Fehler beim Senden der Stichtagsmails/Autozuteilung' });
+    console.error('[Stichtag] Fehler im Haupt-try:', err);
+    res.status(500).json({ error: 'Fehler beim Senden der Stichtagsmails/Autozuteilung', detail: err.message });
   }
 });
 
@@ -430,4 +473,9 @@ app.get('/', (req, res) => {
 // === SERVER START ===
 app.listen(port, () => {
   console.log(`Server läuft auf Port ${port}`);
+  console.log("process.env:", JSON.stringify({
+    PORT: process.env.PORT,
+    SENDGRID_API_KEY: !!process.env.SENDGRID_API_KEY,
+    DATABASE_URL: !!process.env.DATABASE_URL
+  }));
 });
