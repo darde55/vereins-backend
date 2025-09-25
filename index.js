@@ -71,12 +71,31 @@ app.post('/api/login', async (req, res) => {
 });
 
 // === USER ROUTES ===
+// Benutzerliste abrufen
 app.get('/api/users', authenticateToken, async (req, res) => {
   try {
     const result = await pool.query('SELECT username, role, score FROM users');
     res.json(result.rows);
   } catch (e) {
     res.status(500).json({ error: 'Fehler beim Laden der Nutzer' });
+  }
+});
+
+// Neuen Benutzer anlegen (nur Admin)
+app.post('/api/users', authenticateToken, requireAdmin, async (req, res) => {
+  const { username, email, password, role } = req.body;
+  if (!username || !email || !password || !role) {
+    return res.status(400).json({ error: 'Alle Felder erforderlich' });
+  }
+  try {
+    const hash = await bcrypt.hash(password, 10);
+    const result = await pool.query(
+      'INSERT INTO users (username, email, password, role) VALUES ($1, $2, $3, $4) RETURNING username, email, role',
+      [username, email, hash, role]
+    );
+    res.json(result.rows[0]);
+  } catch (e) {
+    res.status(500).json({ error: 'Fehler beim Anlegen des Benutzers', detail: e.message });
   }
 });
 
@@ -103,8 +122,6 @@ app.get('/api/termine', authenticateToken, async (req, res) => {
 
 // Termin erstellen (nur Admin)
 app.post('/api/termine', authenticateToken, requireAdmin, async (req, res) => {
-  // ACHTUNG: Die Spaltennamen müssen zu deiner Datenbank passen!
-  // In deinem Fall heißen sie "ansprechpartner_name" und "ansprechpartner_mail"
   const { titel, beschreibung, datum, beginn, ende, anzahl, stichtag, ansprechpartner, ansprechpartner_email, score } = req.body;
   try {
     const result = await pool.query(`
@@ -120,7 +137,6 @@ app.post('/api/termine', authenticateToken, requireAdmin, async (req, res) => {
 
 // Termin bearbeiten (nur Admin)
 app.patch('/api/termine/:id', authenticateToken, requireAdmin, async (req, res) => {
-  // Auch hier die richtigen Spaltennamen verwenden!
   const { titel, beschreibung, datum, beginn, ende, anzahl, stichtag, ansprechpartner, ansprechpartner_email, score } = req.body;
   try {
     const result = await pool.query(`
@@ -155,8 +171,6 @@ app.delete('/api/termine/:id', authenticateToken, requireAdmin, async (req, res)
 });
 
 // === TEILNAHME ROUTES ===
-
-// ICS-Datei für Termin generieren (RFC 5545)
 function createICS({ titel, beschreibung, datum, beginn, ende }) {
   const dtStart = beginn
     ? datum.replace(/-/g, '') + "T" + beginn.replace(":", "") + "00"
