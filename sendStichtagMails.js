@@ -4,6 +4,7 @@ const { Pool } = require('pg');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const sgMail = require('@sendgrid/mail');
+const sendStichtagMails = require('./sendStichtagMails'); // <== NEU
 
 const app = express();
 const port = process.env.PORT || 3001;
@@ -20,6 +21,9 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL || "postgresql://postgres:pekwzYpGbWUbiXFVnPmHdwuobFuWXGHR@metro.proxy.rlwy.net:56329/railway",
   ssl: { rejectUnauthorized: false }
 });
+
+// == Hier wird das neue Routing-Modul eingebunden ==
+app.use(sendStichtagMails); // <== NEU
 
 // === AUTH MIDDLEWARES ===
 function authenticateToken(req, res, next) {
@@ -103,7 +107,7 @@ app.get('/api/termine', authenticateToken, async (req, res) => {
 
 // Termin erstellen (nur Admin)
 app.post('/api/termine', authenticateToken, requireAdmin, async (req, res) => {
-  // ACHTUNG: Die Spaltennamen müssen zu deiner Datenbank passen!
+  // Spaltennamen müssen zu deiner Datenbank passen!
   // In deinem Fall heißen sie "ansprechpartner_name" und "ansprechpartner_mail"
   const { titel, beschreibung, datum, beginn, ende, anzahl, stichtag, ansprechpartner, ansprechpartner_email, score } = req.body;
   try {
@@ -120,7 +124,6 @@ app.post('/api/termine', authenticateToken, requireAdmin, async (req, res) => {
 
 // Termin bearbeiten (nur Admin)
 app.patch('/api/termine/:id', authenticateToken, requireAdmin, async (req, res) => {
-  // Auch hier die richtigen Spaltennamen verwenden!
   const { titel, beschreibung, datum, beginn, ende, anzahl, stichtag, ansprechpartner, ansprechpartner_email, score } = req.body;
   try {
     const result = await pool.query(`
