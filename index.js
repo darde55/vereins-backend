@@ -71,6 +71,7 @@ app.post('/api/login', async (req, res) => {
 });
 
 // === USER ROUTES ===
+// Benutzerliste abrufen
 app.get('/api/users', authenticateToken, async (req, res) => {
   try {
     const result = await pool.query('SELECT username, role, score FROM users');
@@ -121,6 +122,7 @@ app.get('/api/termine', authenticateToken, async (req, res) => {
 
 // Termin erstellen (nur Admin)
 app.post('/api/termine', authenticateToken, requireAdmin, async (req, res) => {
+  // ACHTUNG: Hier werden jetzt die _name und _mail Felder erwartet!
   const { titel, beschreibung, datum, beginn, ende, anzahl, stichtag, ansprechpartner_name, ansprechpartner_mail, score } = req.body;
   try {
     const result = await pool.query(`
@@ -267,81 +269,6 @@ app.delete('/api/termine/:id/teilnehmer', authenticateToken, async (req, res) =>
     res.json({ success: true });
   } catch (e) {
     res.status(500).json({ error: 'Fehler beim Austragen' });
-  }
-});
-
-// === STICHTAGMAIL-ROUTE ===
-app.post('/api/send-stichtag-mails', async (req, res) => {
-  try {
-    console.log("==== Stichtagsmail-Route aufgerufen ====");
-    const today = new Date().toISOString().slice(0, 10);
-    console.log("Heute ist:", today);
-
-    const result = await pool.query(`
-      SELECT * FROM termine
-      WHERE stichtag = $1 AND (stichtag_mail_gesendet IS NULL OR stichtag_mail_gesendet = false)
-        AND ansprechpartner_mail IS NOT NULL AND ansprechpartner_mail != ''
-    `, [today]);
-    const termine = result.rows;
-    console.log("Gefundene Termine für heute:", termine.length);
-
-    let mailsSent = 0;
-    for (const termin of termine) {
-      try {
-        // Eingeschriebene User holen
-        const teilnehmerRes = await pool.query(
-          'SELECT username FROM teilnahmen WHERE termin_id = $1',
-          [termin.id]
-        );
-        const teilnehmer = teilnehmerRes.rows.map(row => row.username);
-
-        // Mailtext inkl. Teilnehmerliste
-        const mailText = `
-Hallo ${termin.ansprechpartner_name || ""},
-
-dies ist eine automatische Erinnerung zum Stichtag für den Termin:
-Titel: ${termin.titel}
-Datum: ${termin.datum}
-Beginn: ${termin.beginn || "-"}
-Ende: ${termin.ende || "-"}
-Beschreibung: ${termin.beschreibung || "-"}
-
-Eingeschriebene Teilnehmer: ${teilnehmer.length > 0 ? teilnehmer.join(', ') : 'Noch keine'}
-
-Bitte denke an die Organisation!
-
-Viele Grüße
-Dein Vereinsverwaltungssystem
-        `.trim();
-
-        console.log(`--- Versuche Mail zu senden an ${termin.ansprechpartner_mail}, Termin-ID: ${termin.id} ---`);
-        if (!process.env.SENDGRID_API_KEY) {
-          console.error('SENDGRID_API_KEY NICHT gesetzt!');
-          continue;
-        }
-        await sgMail.send({
-          to: termin.ansprechpartner_mail,
-          from: 'tsvdienste@web.de',
-          subject: `Stichtag für Termin: ${termin.titel}`,
-          text: mailText
-        });
-        console.log('Mail erfolgreich gesendet an', termin.ansprechpartner_mail);
-
-        const updateResult = await pool.query(
-          'UPDATE termine SET stichtag_mail_gesendet = true WHERE id = $1',
-          [termin.id]
-        );
-        console.log('DB-UPDATE:', updateResult.rowCount, 'Zeile(n) aktualisiert für Termin-ID:', termin.id);
-        mailsSent++;
-      } catch (mailErr) {
-        console.error(`Fehler beim Mailversand an ${termin.ansprechpartner_mail}:`, mailErr);
-      }
-    }
-    console.log('==== Fertig. Gesendete Mails:', mailsSent, '====');
-    res.json({ success: true, mailsSent });
-  } catch (err) {
-    console.error('Fehler beim Stichtagsmail-Versand:', err);
-    res.status(500).json({ error: 'Fehler beim Senden der Stichtagsmails' });
   }
 });
 
