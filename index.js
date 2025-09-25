@@ -122,13 +122,14 @@ app.get('/api/termine', authenticateToken, async (req, res) => {
 
 // Termin erstellen (nur Admin)
 app.post('/api/termine', authenticateToken, requireAdmin, async (req, res) => {
-  const { titel, beschreibung, datum, beginn, ende, anzahl, stichtag, ansprechpartner, ansprechpartner_email, score } = req.body;
+  // ACHTUNG: Hier werden jetzt die _name und _mail Felder erwartet!
+  const { titel, beschreibung, datum, beginn, ende, anzahl, stichtag, ansprechpartner_name, ansprechpartner_mail, score } = req.body;
   try {
     const result = await pool.query(`
       INSERT INTO termine (titel, beschreibung, datum, beginn, ende, anzahl, stichtag, ansprechpartner_name, ansprechpartner_mail, score)
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
       RETURNING *
-    `, [titel, beschreibung, datum, beginn, ende, anzahl, stichtag, ansprechpartner, ansprechpartner_email, score]);
+    `, [titel, beschreibung, datum, beginn, ende, anzahl, stichtag, ansprechpartner_name, ansprechpartner_mail, score]);
     res.json(result.rows[0]);
   } catch (e) {
     res.status(500).json({ error: 'Fehler beim Erstellen des Termins' });
@@ -137,7 +138,7 @@ app.post('/api/termine', authenticateToken, requireAdmin, async (req, res) => {
 
 // Termin bearbeiten (nur Admin)
 app.patch('/api/termine/:id', authenticateToken, requireAdmin, async (req, res) => {
-  const { titel, beschreibung, datum, beginn, ende, anzahl, stichtag, ansprechpartner, ansprechpartner_email, score } = req.body;
+  const { titel, beschreibung, datum, beginn, ende, anzahl, stichtag, ansprechpartner_name, ansprechpartner_mail, score } = req.body;
   try {
     const result = await pool.query(`
       UPDATE termine 
@@ -153,7 +154,7 @@ app.patch('/api/termine/:id', authenticateToken, requireAdmin, async (req, res) 
           score = COALESCE($10, score)
       WHERE id = $11
       RETURNING *
-    `, [titel, beschreibung, datum, beginn, ende, anzahl, stichtag, ansprechpartner, ansprechpartner_email, score, req.params.id]);
+    `, [titel, beschreibung, datum, beginn, ende, anzahl, stichtag, ansprechpartner_name, ansprechpartner_mail, score, req.params.id]);
     res.json(result.rows[0]);
   } catch (e) {
     res.status(500).json({ error: 'Fehler beim Bearbeiten des Termins' });
